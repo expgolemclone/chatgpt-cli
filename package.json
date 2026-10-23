@@ -1,0 +1,23 @@
+{
+  "name": "gpt-send-messages",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Send locally generated programming questions through dedicated Edge profiles.",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "preview": "pwsh -NoProfile -File ./send-messages.ps1 -DryRun",
+    "start": "pwsh -NoProfile -File ./send-messages.ps1"
+  },
+  "dependencies": {
+    "playwright": "1.64.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
