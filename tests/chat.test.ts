@@ -14,14 +14,16 @@ const prompt: Prompt = { id: 'test', text: 'Review this:\n```ts\nconst n = 3;\n`
 
 function fixture(mode: string): string {
   return `<!doctype html><html><head><title>Local chat fixture</title></head><body>
-  ${mode === 'login' ? '<button>ログイン</button>' : mode === 'modern'
+  ${['login', 'conflicting-login'].includes(mode) ? '<button>ログイン</button>' : mode === 'collapsed' ? '' : mode === 'modern'
     ? '<button aria-label="プロフィールメニューを開く">プロフィールを読み込み中</button><button aria-label="プロフィールメニューを開く"></button>'
     : '<button data-testid="accounts-profile-button">Account</button>'}
   ${mode === 'modern' ? '<div id="prompt-textarea" contenteditable="true" style="display:none"></div>' : ''}
   <div ${mode === 'modern' ? '' : 'id="prompt-textarea"'} contenteditable="true" role="textbox" aria-label="ChatGPT に聞く">${mode === 'draft' ? 'Do not overwrite my draft' : ''}</div>
+  <button aria-label="送信" disabled>Send</button>
   <main></main>
   <script>
     const mode = ${JSON.stringify(mode)};
+    if (mode !== 'identity-missing') fetch('/backend-api/me');
     const composer = document.querySelector('[role="textbox"]');
     if (mode === 'modern') composer.addEventListener('input', () => {
       const paragraphs = composer.innerText.split('\\n').map(line => {
@@ -29,9 +31,11 @@ function fixture(mode: string): string {
       });
       composer.replaceChildren(...paragraphs);
     });
-    composer.addEventListener('keydown', event => {
-      if (event.key !== 'Enter' || event.shiftKey) return;
-      event.preventDefault();
+    const send = document.querySelector('[aria-label="送信"]');
+    composer.addEventListener('input', () => {
+      if (mode !== 'send-disabled') setTimeout(() => { send.disabled = false; }, mode === 'delayed-send' ? 150 : 0);
+    });
+    send.addEventListener('click', () => {
       const text = composer.innerText;
       fetch('/sent', {method: 'POST', body: text});
       const user = document.createElement('div');
@@ -72,8 +76,16 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   assert.ok(existsSync(edge), `Browser executable is required: ${edge}`);
   const sent: string[] = [];
   let mode = 'normal';
+  let identityRequests = 0;
   const server = createServer(async (request, response) => {
-    if (request.url === '/sent') {
+    if (request.url === '/backend-api/me') {
+      identityRequests++;
+      const status = mode === 'identity-forbidden' ? 403 : mode === 'identity-limited' ? 429
+        : mode === 'identity-unauthorized' || (mode === 'identity-expires' && identityRequests > 1) ? 401 : 200;
+      response.writeHead(status, { 'content-type': 'application/json' });
+      response.end(mode === 'identity-invalid' ? 'invalid-json'
+        : JSON.stringify(mode === 'identity-no-email' ? {} : { email: 'fixture@example.test' }));
+    } else if (request.url === '/sent') {
       let body = '';
       for await (const chunk of request) body += String(chunk);
       sent.push(body);
@@ -92,7 +104,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   const page = await context.newPage();
   const options = { url, readyTimeoutMs: 2000, responseTimeoutMs: 2000, stableMs: 40, pollMs: 20 };
   try {
-    await t.test('sends with Enter once and waits for completion before the next chat', async () => {
+    await t.test('clicks Send once and waits for completion before the next chat', async () => {
       sent.length = 0; mode = 'normal';
       const events: string[] = [];
       await runChat(page, [prompt, { ...prompt, id: 'second', text: 'Second question' }], {
@@ -109,6 +121,51 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       assert.equal(sent[0]!.replace(/\s+/g, ' '), prompt.text.replace(/\s+/g, ' '));
       assert.equal(sent[1], 'Next modern question');
       assert.equal(await page.locator('[data-content-search-unit-key$=":assistant"]').innerText(), 'Final answer');
+    });
+    await t.test('waits for the Send control to become enabled without relying on Enter settings', async () => {
+      mode = 'delayed-send'; sent.length = 0;
+      await runChat(page, [prompt], options);
+      assert.deepEqual(sent, [prompt.text]);
+    });
+    await t.test('never submits through a disabled Send control', async () => {
+      mode = 'send-disabled'; sent.length = 0;
+      await assert.rejects(runChat(page, [prompt], { ...options, readyTimeoutMs: 350 }), /Send control timed out/);
+      assert.equal(sent.length, 0);
+    });
+    await t.test('a collapsed sidebar does not hide native authentication', async () => {
+      mode = 'collapsed'; sent.length = 0;
+      await runChat(page, [prompt], options);
+      assert.deepEqual(sent, [prompt.text]);
+    });
+    await t.test('profile controls cannot replace a missing, invalid, or unauthorized native identity', async () => {
+      for (const value of ['identity-missing', 'identity-invalid', 'identity-no-email', 'identity-unauthorized', 'conflicting-login']) {
+        mode = value; sent.length = 0;
+        await assert.rejects(runChat(page, [prompt], { ...options, readyTimeoutMs: 350 }), ProfileNotReadyError);
+        assert.equal(sent.length, 0, value);
+      }
+    });
+    await t.test('native login identity is revalidated for every new chat', async () => {
+      mode = 'identity-expires'; identityRequests = 0; sent.length = 0;
+      await assert.rejects(runChat(page, [prompt, prompt], { ...options, readyTimeoutMs: 350 }), ProfileNotReadyError);
+      assert.equal(sent.length, 1);
+      assert.equal(identityRequests, 2);
+    });
+    await t.test('login loss after filling stops before clicking Send', async () => {
+      mode = 'normal'; sent.length = 0;
+      await assert.rejects(runChat(page, [prompt], {
+        ...options, beforeSend: async () => {
+          mode = 'identity-unauthorized';
+          await page.evaluate(async () => { await fetch('/backend-api/me'); });
+        },
+      }), ProfileNotReadyError);
+      assert.equal(sent.length, 0);
+    });
+    await t.test('403 and 429 identity responses stop before submission', async () => {
+      for (const value of ['identity-forbidden', 'identity-limited']) {
+        mode = value; sent.length = 0;
+        await assert.rejects(runChat(page, [prompt], options), AccessBlockedError);
+        assert.equal(sent.length, 0);
+      }
     });
     await t.test('a new server-assigned conversation URL also acknowledges submission', async () => {
       sent.length = 0; mode = 'url-ack';

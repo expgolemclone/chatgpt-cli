@@ -24,7 +24,7 @@ async function composerText(composer: Locator): Promise<string> {
       ? element.value : element instanceof HTMLElement ? element.innerText : element.textContent ?? '');
 }
 
-/** New chat for every prompt. Enter is explicit: codegen missed this action. */
+/** New chat for every prompt. Submit exactly once through the enabled Send control. */
 export async function runChat(page: Page, prompts: Prompt[], options: ChatOptions = {}): Promise<void> {
   const url = options.url ?? 'https://chatgpt.com/';
   const origin = new URL(url).origin;
@@ -32,13 +32,28 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
   const stableMs = options.stableMs ?? 1500;
   const readyTimeoutMs = options.readyTimeoutMs ?? 60_000;
   let httpBlock: string | undefined;
+  let nativeIdentity = false;
+  let identityRevision = 0;
   const onResponse = (response: Response) => {
     const target = new URL(response.url());
     const request = response.request();
     const mainDocument = request.isNavigationRequest() && response.frame() === page.mainFrame();
-    if (target.origin === origin && (mainDocument || target.pathname.startsWith('/backend-api/')) &&
+    if (target.origin !== origin) return;
+    if ((mainDocument || target.pathname.startsWith('/backend-api/')) &&
         (response.status() === 403 || response.status() === 429)) {
       httpBlock = `HTTP ${response.status()} ${target.pathname}`;
+    }
+    if (target.pathname === '/backend-api/me') {
+      nativeIdentity = false;
+      const observedRevision = ++identityRevision;
+      // Observe only the app's normal request. Never request credentials or log its body.
+      if (response.status() === 200) {
+        void response.json().then((value: unknown) => {
+          if (identityRevision !== observedRevision) return;
+          nativeIdentity = value !== null && typeof value === 'object' &&
+            'email' in value && typeof value.email === 'string' && /^[^@\s]+@[^@\s]+$/.test(value.email);
+        }).catch(() => {}); // Missing/invalid identity remains unconfirmed and cannot send.
+      }
     }
   };
   page.on('response', onResponse);
@@ -69,22 +84,16 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
 
   try {
     for (const prompt of prompts) {
+      identityRevision++;
+      nativeIdentity = false;
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: readyTimeoutMs });
       const composer = page.locator('#prompt-textarea').or(page.getByRole('textbox', {
         name: /ChatGPT に聞く|Ask anything|Ask ChatGPT|Message ChatGPT/i,
       })).filter({ visible: true }).first();
-      // Both the legacy UI and the current app shell are used across accounts.
-      const account = page.getByTestId('accounts-profile-button').or(page.getByRole('button', {
-        name: /^(プロフィールメニューを開く|Open profile menu)$/i,
-      })).filter({ visible: true });
       const readiness = { signedIn: false, composerVisible: false, composerEditable: false, generating: false };
       try {
         await waitUntil(async () => {
-          // Hydration can briefly expose both a loading control and the real account menu.
-          readiness.signedIn = await account.evaluateAll(elements => elements.some(element =>
-            !(element instanceof HTMLButtonElement && element.disabled) &&
-            element.getAttribute('aria-disabled') !== 'true' &&
-            !/プロフィールを読み込み中|loading profile/i.test(element.textContent ?? '')));
+          readiness.signedIn = nativeIdentity;
           readiness.composerVisible = await composer.isVisible();
           readiness.composerEditable = readiness.composerVisible && await composer.isEditable();
           readiness.generating = await stopped.isVisible();
@@ -108,14 +117,18 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       // post-fill state, not the original plain text, to detect later manual edits.
       const filledText = await composerText(composer);
       if (!filledText.trim()) throw new ProfileNotReadyError('Composer is empty after filling.');
+      const send = page.getByRole('button', { name: /^(Send|Send message|Send prompt|送信)$/i })
+        .filter({ visible: true }).first();
+      await waitUntil(async () => await send.isVisible() && await send.isEnabled(), readyTimeoutMs, 'Send control');
       await options.beforeSend?.();
       await guard();
+      if (!nativeIdentity) throw new ProfileNotReadyError('Native login identity is no longer confirmed; no message will be sent.');
       if ((await composerText(composer)).replaceAll('\r\n', '\n') !== filledText.replaceAll('\r\n', '\n')) {
         throw new ProfileNotReadyError('Composer changed before sending; no message will be sent.');
       }
       const beforeSubmitUrl = page.url();
       options.onEvent?.('sending', prompt);
-      await composer.press('Enter'); // Send ONCE. Never retry an uncertain submission.
+      await send.click({ timeout: readyTimeoutMs }); // Never retry an uncertain submission.
       const timeout = options.responseTimeoutMs ?? 300_000;
       try {
         await waitUntil(async () => {
@@ -161,6 +174,7 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       options.onEvent?.('completed', prompt);
     }
   } finally {
+    identityRevision++;
     page.off('response', onResponse);
   }
 }
