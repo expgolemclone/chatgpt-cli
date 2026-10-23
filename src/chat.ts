@@ -105,14 +105,11 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
         }
         throw error;
       }
-      if ((await composerText(composer)).trim()) {
-        throw new ProfileNotReadyError('An existing draft is present; it will not be overwritten.');
-      }
       const users = page.locator('[data-message-author-role="user"], [data-user-message-bubble]');
       const assistants = page.locator('[data-message-author-role="assistant"], [data-content-search-unit-key$=":assistant"]');
       const previousUsers = await users.count();
       const previousAssistants = await assistants.count();
-      await composer.fill(prompt.text);
+      await composer.fill(prompt.text); // Replace any existing draft instead of appending to it.
       // The rich-text editor normalizes paragraphs/blank lines during fill. Compare its
       // post-fill state, not the original plain text, to detect later manual edits.
       const filledText = await composerText(composer);

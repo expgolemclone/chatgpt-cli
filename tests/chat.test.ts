@@ -18,7 +18,7 @@ function fixture(mode: string): string {
     ? '<button aria-label="プロフィールメニューを開く">プロフィールを読み込み中</button><button aria-label="プロフィールメニューを開く"></button>'
     : '<button data-testid="accounts-profile-button">Account</button>'}
   ${mode === 'modern' ? '<div id="prompt-textarea" contenteditable="true" style="display:none"></div>' : ''}
-  <div ${mode === 'modern' ? '' : 'id="prompt-textarea"'} contenteditable="true" role="textbox" aria-label="ChatGPT に聞く">${mode === 'draft' ? 'Do not overwrite my draft' : ''}</div>
+  <div ${mode === 'modern' ? '' : 'id="prompt-textarea"'} contenteditable="true" role="textbox" aria-label="ChatGPT に聞く">${mode === 'draft' ? 'Existing draft' : ''}</div>
   <button aria-label="送信" disabled>Send</button>
   <main></main>
   <script>
@@ -184,12 +184,16 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       assert.deepEqual(sent, [prompt.text]);
       assert.match(page.url(), /\/c\/11111111-1111-4111-8111-111111111111$/);
     });
-    await t.test('logged-out pages and drafts are not submitted', async () => {
-      for (const value of ['login', 'draft']) {
-        mode = value; sent.length = 0;
-        await assert.rejects(runChat(page, [prompt], options), ProfileNotReadyError);
-        assert.equal(sent.length, 0);
-      }
+    await t.test('replaces existing drafts with only the current prompt in every new chat', async () => {
+      mode = 'draft'; sent.length = 0;
+      const next = { ...prompt, id: 'next', text: 'Replacement prompt' };
+      await runChat(page, [prompt, next], options);
+      assert.deepEqual(sent, [prompt.text, next.text]);
+    });
+    await t.test('logged-out pages are not submitted', async () => {
+      mode = 'login'; sent.length = 0;
+      await assert.rejects(runChat(page, [prompt], options), ProfileNotReadyError);
+      assert.equal(sent.length, 0);
     });
     await t.test('manual edits after filling are not sent', async () => {
       mode = 'normal'; sent.length = 0;
