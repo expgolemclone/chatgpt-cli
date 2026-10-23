@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { chromium } from 'playwright';
 import { AccessBlockedError, ProfileNotReadyError, runChat } from '../src/chat.js';
-import type { Prompt } from '../src/prompts.js';
+import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.js';
 
 const edge = process.env.EDGE_EXECUTABLE ?? (process.platform === 'win32'
   ? join(process.env['ProgramFiles(x86)'] ?? 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe')
@@ -121,6 +121,17 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       assert.equal(sent[0]!.replace(/\s+/g, ' '), prompt.text.replace(/\s+/g, ' '));
       assert.equal(sent[1], 'Next modern question');
       assert.equal(await page.locator('[data-content-search-unit-key$=":assistant"]').innerText(), 'Final answer');
+    });
+    await t.test('image and Codex prompt bodies reach the local fixture without code review wrapping', async () => {
+      const prompts = generatePrompts('a', 'mixed-chat', maxPrompts).filter(item =>
+        item.id === 'image-presentation-cover' || item.id === 'codex-pilot');
+      assert.equal(prompts.length, 2);
+      for (const value of ['normal', 'modern']) {
+        mode = value; sent.length = 0;
+        await runChat(page, prompts, options);
+        assert.deepEqual(sent.map(text => text.replace(/\s+/g, ' ')),
+          prompts.map(item => item.text.replace(/\s+/g, ' ')));
+      }
     });
     await t.test('waits for the Send control to become enabled without relying on Enter settings', async () => {
       mode = 'delayed-send'; sent.length = 0;

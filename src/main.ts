@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { chromium, type BrowserContext, type Page } from 'playwright';
 import { AccessBlockedError, runChat } from './chat.js';
-import { generatePrompts, maxQuestions } from './prompts.js';
+import { generatePrompts } from './prompts/generate.js';
 
 interface Profile { id: string; name: string; path: string }
 interface Manifest { schemaVersion: 1; edgePath: string; edgeArguments: string[]; profileRoot: string; profiles: Profile[] }
@@ -50,15 +50,14 @@ async function main(): Promise<void> {
   } });
   if (!values.manifest) throw new Error('Use send-messages.ps1 to resolve local profiles.');
   const count = Number(values.questions);
-  if (!Number.isInteger(count) || count < 1 || count > maxQuestions) {
-    throw new Error(`--questions must be between 1 and ${maxQuestions}.`);
-  }
   const manifest = readManifest(values.manifest);
   const seed = values.seed ?? randomUUID();
+  const batches = manifest.profiles.map(profile => ({
+    profile, prompts: generatePrompts(profile.id, seed, count),
+  }));
   if (values['dry-run']) {
-    console.log(JSON.stringify({ seed, profiles: manifest.profiles.map(profile => ({
-      name: profile.name,
-      prompts: generatePrompts(profile.id, seed, count),
+    console.log(JSON.stringify({ seed, profiles: batches.map(({ profile, prompts }) => ({
+      name: profile.name, prompts,
     })) }, null, 2));
     return;
   }
@@ -71,10 +70,10 @@ async function main(): Promise<void> {
     appendFileSync(logFile, JSON.stringify(record) + '\n', 'utf8');
     console.log(JSON.stringify(record));
   };
-  log('started', { seed, profiles: manifest.profiles.length, logFile });
+  log('started', { seed, profiles: batches.length, logFile });
   let lastSend = 0;
   let failed = false;
-  for (const profile of manifest.profiles) {
+  for (const { profile, prompts } of batches) {
     let context: BrowserContext | undefined;
     let lastPage: Page | undefined;
     try {
@@ -85,7 +84,7 @@ async function main(): Promise<void> {
       });
       const page = await context.newPage();
       lastPage = page;
-      await runChat(page, generatePrompts(profile.id, seed, count), {
+      await runChat(page, prompts, {
         beforeSend: async () => {
           const delay = Math.max(0, lastSend + 30_000 - Date.now());
           if (delay) await new Promise(resolve => setTimeout(resolve, delay));

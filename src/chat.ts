@@ -1,5 +1,5 @@
 import type { Locator, Page, Response } from 'playwright';
-import type { Prompt } from './prompts.js';
+import type { Prompt } from './prompts/generate.js';
 
 export class AccessBlockedError extends Error {}
 export class ProfileNotReadyError extends Error {}

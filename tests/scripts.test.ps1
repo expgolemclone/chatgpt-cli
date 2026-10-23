@@ -1,4 +1,6 @@
 #requires -Version 7.0
+param([Parameter(Mandatory)][int]$MaxPrompts)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -52,17 +54,29 @@ Export-ModuleMember -Function Get-GptUsageModel
     $send = Join-Path $root 'send-messages.ps1'
     $preview = ((& $send -RegistryPath $registry -DryRun -Seed test) -join "`n") | ConvertFrom-Json
     Assert-That ($preview.profiles.Count -eq 2) 'Dry run must select only local profiles.'
-    Assert-That ($preview.profiles[0].prompts.Count -eq 2) 'Default must generate two questions.'
+    Assert-That ($preview.profiles[0].prompts.Count -eq 2) 'Default must generate two prompts.'
     $excluded = ((& $send -RegistryPath $registry -DryRun -ExcludeProfile one) -join "`n") | ConvertFrom-Json
     Assert-That ($excluded.profiles.Count -eq 1 -and $excluded.profiles[0].name -eq 'two') 'Completed profiles must be excludable.'
-    $selected = ((& $send -RegistryPath $registry -DryRun -Profile two -QuestionCount 3 -Seed test) -join "`n") | ConvertFrom-Json
+    $selected = ((& $send -RegistryPath $registry -DryRun -Profile two -QuestionCount 7 -Seed test) -join "`n") | ConvertFrom-Json
     Assert-That ($selected.profiles.Count -eq 1 -and $selected.profiles[0].name -eq 'two') 'Profile filter was lost.'
-    Assert-That ($selected.profiles[0].prompts.Count -eq 3) 'Question count was lost.'
+    Assert-That ($selected.profiles[0].prompts.Count -eq 7) 'Counts above the old limit must reach the generator.'
+    $full = ((& $send -RegistryPath $registry -DryRun -Profile one -QuestionCount $MaxPrompts -Seed test) -join "`n") | ConvertFrom-Json
+    Assert-That ($full.profiles[0].prompts.Count -eq $MaxPrompts) 'The catalog must determine the upper count limit.'
+    Assert-That (@($full.profiles[0].prompts.id | Select-Object -Unique).Count -eq $MaxPrompts) 'Templates must not repeat.'
+    Assert-That (@($full.profiles[0].prompts | Where-Object text -Like '@create image*').Count -ge 3) 'Image prompt text was lost.'
+    Assert-That (@($full.profiles[0].prompts | Where-Object text -Like 'Codexを社内で導入検討している.*').Count -ge 3) 'Codex adoption prompt text was lost.'
     foreach ($arguments in @(
         @{RegistryPath=$registry;Profile='missing'},
         @{RegistryPath=$registry;ExcludeProfile=@('one','two')},
         @{RegistryPath='relative.json'},
-        @{RegistryPath=(Join-Path $usage 'profiles/missing.json')}
+        @{RegistryPath=(Join-Path $usage 'profiles/missing.json')},
+        @{RegistryPath=$registry;QuestionCount=0},
+        @{RegistryPath=$registry;QuestionCount=-1},
+        @{RegistryPath=$registry;QuestionCount=1.5},
+        @{RegistryPath=$registry;QuestionCount='NaN'},
+        @{RegistryPath=$registry;QuestionCount='Infinity'},
+        @{RegistryPath=$registry;QuestionCount='invalid'},
+        @{RegistryPath=$registry;QuestionCount=($MaxPrompts + 1)}
     )) {
         $rejected = $false
         try { & $send @arguments -DryRun }

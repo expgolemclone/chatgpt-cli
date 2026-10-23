@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory)][string]$RegistryPath,
     [string]$Profile,
     [string[]]$ExcludeProfile = @(),
-    [ValidateRange(1, 6)][int]$QuestionCount = 2,
+    [string]$QuestionCount = '2',
     [switch]$DryRun,
     [string]$Seed,
     [string]$NodePath
