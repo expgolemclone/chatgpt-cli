@@ -14,6 +14,7 @@ const edge = process.env.EDGE_EXECUTABLE ?? (process.platform === 'win32'
   : chromium.executablePath());
 const prompt: Prompt = { id: 'test', text: 'Review this:\n```ts\nconst n = 3;\n```' };
 const accountCheck = '/backend-api/accounts/check/v4-2023-04-27';
+const featurePath = '/backend-api/bazaar/obi/sync-token';
 
 function fixture(mode: string): string {
   return `<!doctype html><html><head><title>Local chat fixture</title></head><body>
@@ -28,6 +29,7 @@ function fixture(mode: string): string {
     const mode = ${JSON.stringify(mode)};
     if (mode !== 'identity-missing') fetch('/backend-api/me');
     if (mode !== 'plan-missing') fetch('${accountCheck}?timezone_offset_min=0');
+    if (mode === 'feature-failure') fetch('${featurePath}');
     const composer = document.querySelector('[role="textbox"]');
     if (mode === 'modern') composer.addEventListener('input', () => {
       const paragraphs = composer.innerText.split('\\n').map(line => {
@@ -39,8 +41,9 @@ function fixture(mode: string): string {
     composer.addEventListener('input', () => {
       if (mode !== 'send-disabled') setTimeout(() => { send.disabled = false; }, mode === 'delayed-send' ? 150 : 0);
     });
-    send.addEventListener('click', () => {
+    send.addEventListener('click', async () => {
       const text = composer.innerText;
+      if (mode === 'feature-failure') await fetch('${featurePath}');
       fetch('/backend-api/f/conversation', {method: 'POST', body: text});
       if (mode === 'no-dom-ack') return;
       const user = document.createElement('div');
@@ -69,8 +72,15 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   let mode = 'normal';
   let identityRequests = 0;
   let planRequests = 0;
+  const failures = new Map<string, number>();
+  const failedRequests: string[] = [];
   const server = createServer(async (request, response) => {
-    if (request.url === '/backend-api/me') {
+    const failureStatus = failures.get(request.url ?? '');
+    if (failureStatus !== undefined) {
+      failedRequests.push(request.url!);
+      response.writeHead(failureStatus, { 'content-type': 'application/json' });
+      response.end('{}');
+    } else if (request.url === '/backend-api/me') {
       identityRequests++;
       const status = mode === 'identity-forbidden' ? 403 : mode === 'identity-limited' ? 429
         : mode === 'identity-unauthorized' || (mode === 'identity-expires' && identityRequests > 1) ? 401 : 200;
@@ -314,6 +324,61 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       }), ProfileNotReadyError);
       assert.equal(sent.length, 0);
     });
+    await t.test('feature-specific 403 and 429 responses do not block chat readiness or acceptance', async () => {
+      try {
+        for (const status of [403, 429]) {
+          mode = 'feature-failure'; sent.length = 0; failedRequests.length = 0;
+          failures.set(featurePath, status);
+          failures.set('/backend-api/optional-feature', status);
+          const events: string[] = [];
+          await runChat(page, [prompt, { ...prompt, id: 'next', text: 'Next question' }], {
+            ...options, onEvent: (event, item) => events.push(`${event}:${item.id}`), beforeSend: async () => {
+              // Exercise another feature before submission, not a Bazaar-specific exception.
+              await page.evaluate(async () => { await fetch('/backend-api/optional-feature'); });
+            },
+          });
+          assert.deepEqual(sent, [prompt.text, 'Next question']);
+          assert.deepEqual(events, ['sending:test', 'sent:test', 'sending:next', 'sent:next']);
+          assert.equal(failedRequests.filter(path => path === featurePath).length, 4);
+          assert.equal(failedRequests.filter(path => path === '/backend-api/optional-feature').length, 2);
+        }
+      } finally {
+        failures.clear();
+      }
+    });
+    await t.test('403 and 429 chat preparation and security responses still stop before submission', async () => {
+      try {
+        for (const path of ['/backend-api/f/conversation/prepare', '/backend-api/sentinel/chat-requirements',
+          '/backend-api/sentinel/chat-requirements/prepare']) {
+          for (const status of [403, 429]) {
+            mode = 'normal'; sent.length = 0;
+            failures.clear(); failures.set(path, status);
+            const events: string[] = [];
+            await assert.rejects(runChat(page, [prompt, prompt], {
+              ...options, onEvent: event => events.push(event), beforeSend: async () => {
+                await page.evaluate(async path => { await fetch(path); }, path);
+              },
+            }), (error: unknown) => error instanceof AccessBlockedError && error.message === `HTTP ${status} ${path}`);
+            assert.equal(sent.length, 0);
+            assert.deepEqual(events, []);
+          }
+        }
+      } finally {
+        failures.clear();
+      }
+    });
+    await t.test('403 and 429 main documents still stop before submission', async () => {
+      try {
+        for (const status of [403, 429]) {
+          mode = 'normal'; sent.length = 0;
+          failures.set('/', status);
+          await assert.rejects(runChat(page, [prompt, prompt], options), AccessBlockedError);
+          assert.equal(sent.length, 0);
+        }
+      } finally {
+        failures.clear();
+      }
+    });
     await t.test('403 and visible usage limits stop rather than trying another question', async () => {
       mode = 'forbidden'; sent.length = 0;
       await assert.rejects(runChat(page, [prompt], options), AccessBlockedError);
@@ -365,7 +430,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   }
 });
 
-test('the CLI skips paid profiles successfully, continues to free profiles, and stops the batch on access blocks', () => {
+test('the CLI skips paid profiles, tolerates feature failures, and stops the batch on chat access blocks', () => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-cli-test-');
   try {
     const preload = join(temporary, 'fixture.mjs');
@@ -385,13 +450,16 @@ test('the CLI skips paid profiles successfully, continues to free profiles, and 
           if (target.pathname.startsWith('/backend-api/accounts/check/')) {
             return route.fulfill({ json: { accounts: { default: { account: { plan_type: name === 'paid' ? 'plus' : 'free' } } } } });
           }
+          if (target.pathname === ${JSON.stringify(featurePath)}) {
+            return route.fulfill({ status: name === 'feature-limited' ? 429 : 403, json: {} });
+          }
           if (target.pathname === '/backend-api/f/conversation') {
             console.log(JSON.stringify({ event: 'fixture-submitted', profile: name }));
-            return route.fulfill({ status: 200, body: 'ok' });
+            return route.fulfill({ status: name === 'submission-blocked' ? 403 : name === 'submission-limited' ? 429 : 200, body: 'ok' });
           }
           if (route.request().isNavigationRequest()) {
             return route.fulfill({ status: name === 'blocked' ? 403 : 200,
-              contentType: 'text/html; charset=utf-8', body: ${JSON.stringify(fixture('normal'))} });
+              contentType: 'text/html; charset=utf-8', body: ${JSON.stringify(fixture('feature-failure'))} });
           }
           return route.abort();
         });
@@ -403,7 +471,10 @@ test('the CLI skips paid profiles successfully, continues to free profiles, and 
     const scenarios = [
       { names: ['paid', 'free'], status: 0, submitted: ['free'], skipped: ['paid'], opened: ['paid', 'free'] },
       { names: ['paid'], status: 0, submitted: [], skipped: ['paid'], opened: ['paid'] },
+      { names: ['feature-limited'], status: 0, submitted: ['feature-limited'], skipped: [], opened: ['feature-limited'] },
       { names: ['blocked', 'free'], status: 1, submitted: [], skipped: [], opened: ['blocked'] },
+      { names: ['submission-blocked', 'free'], status: 1, submitted: ['submission-blocked'], skipped: [], opened: ['submission-blocked'] },
+      { names: ['submission-limited', 'free'], status: 1, submitted: ['submission-limited'], skipped: [], opened: ['submission-limited'] },
     ];
     for (const [index, scenario] of scenarios.entries()) {
       const root = join(temporary, String(index), 'profiles');

@@ -40,11 +40,15 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
     const request = response.request();
     const mainDocument = request.isNavigationRequest() && response.frame() === page.mainFrame();
     if (target.origin !== origin) return;
-    if ((mainDocument || target.pathname.startsWith('/backend-api/')) &&
+    const identityRequest = target.pathname === '/backend-api/me';
+    const planRequest = target.pathname.startsWith('/backend-api/accounts/check/');
+    const chatRequest = /^\/backend-api\/(?:f\/conversation|sentinel)(?:\/|$)/.test(target.pathname);
+    // Feature-specific failures do not establish a chat-wide access block.
+    if ((mainDocument || identityRequest || planRequest || chatRequest) &&
         (response.status() === 403 || response.status() === 429)) {
       httpBlock = `HTTP ${response.status()} ${target.pathname}`;
     }
-    if (target.pathname === '/backend-api/me') {
+    if (identityRequest) {
       nativeIdentity = false;
       const observedRevision = ++identityRevision;
       // Observe only the app's normal request. Never request credentials or log its body.
@@ -56,7 +60,7 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
         }).catch(() => {}); // Missing/invalid identity remains unconfirmed and cannot send.
       }
     }
-    if (target.pathname.startsWith('/backend-api/accounts/check/')) {
+    if (planRequest) {
       accountPlan = 'unknown';
       const observedRevision = ++planRevision;
       if (response.status() === 200) {
