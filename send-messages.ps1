@@ -2,7 +2,6 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$RegistryPath,
     [string]$Profile,
     [string[]]$ExcludeProfile = @(),
     [string]$QuestionCount = '2',
@@ -15,7 +14,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 if (-not $IsWindows) { throw 'This command requires Windows and Microsoft Edge.' }
-if (-not [IO.Path]::IsPathFullyQualified($RegistryPath)) { throw 'RegistryPath must be absolute.' }
 if (-not $NodePath) {
     $NodePath = & mise.exe --cd $PSScriptRoot which node
     if ($LASTEXITCODE -ne 0 -or @($NodePath).Count -ne 1 -or -not (Test-Path -LiteralPath $NodePath -PathType Leaf)) {
@@ -24,16 +22,15 @@ if (-not $NodePath) {
 }
 $cli = Join-Path $PSScriptRoot 'dist/src/main.js'
 if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw 'Run npm ci and npm run build first.' }
-$registry = [IO.Path]::GetFullPath($RegistryPath)
-$modulePath = Join-Path (Split-Path $registry -Parent) '../src/GptUsage.psm1'
+$modulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'gpt-usage/src/GptUsage.psm1'
 $module = Import-Module $modulePath -Force -PassThru
 
 # Reuse gpt-usage selection, browser isolation flags, and its device-wide lock.
 & $module {
-    param($Registry, $SelectedProfile, $ExcludedProfiles, $Cli, $Node, $Count, $Preview, $RunSeed)
-    $model = Get-GptUsageModel -RegistryPath $Registry -RequireEdge
+    param($SelectedProfile, $ExcludedProfiles, $Cli, $Node, $Count, $Preview, $RunSeed)
+    $model = Get-GptUsageModel -RequireEdge
     Invoke-GptUsageDeviceOperation -ProfileRoot $model.ProfileRoot -Action {
-        $model = Get-GptUsageModel -RegistryPath $Registry -RequireEdge
+        $model = Get-GptUsageModel -RequireEdge
         $capturedProfiles = [Collections.Generic.List[object]]::new()
         Invoke-GptUsageOpen -Model $model -Profile $SelectedProfile -StartBrowser {
             param($Executable, $Arguments)
@@ -66,4 +63,4 @@ $module = Import-Module $modulePath -Force -PassThru
             if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
         }
     }
-} $registry $Profile $ExcludeProfile $cli $NodePath $QuestionCount $DryRun.IsPresent $Seed
+} $Profile $ExcludeProfile $cli $NodePath $QuestionCount $DryRun.IsPresent $Seed

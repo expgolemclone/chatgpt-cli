@@ -11,25 +11,27 @@ function Assert-That([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 try {
-    $usage = Join-Path $temporary 'upstream'
-    $null = New-Item -ItemType Directory -Path (Join-Path $usage 'src'), (Join-Path $usage 'profiles') -Force
+    $usage = Join-Path $temporary 'gpt-usage'
+    $product = Join-Path $temporary 'gpt-send-messages'
+    $null = New-Item -ItemType Directory -Path (Join-Path $usage 'src'), $product -Force
+    Copy-Item -LiteralPath (Join-Path $root 'send-messages.ps1') -Destination $product
+    $null = New-Item -ItemType Directory -Path (Join-Path $product 'dist')
+    Copy-Item -LiteralPath (Join-Path $root 'dist/src') -Destination (Join-Path $product 'dist/src') -Recurse
+    $null = New-Item -ItemType Junction -Path (Join-Path $product 'node_modules') -Target (Join-Path $root 'node_modules')
     $profiles = Join-Path $temporary 'profiles'
     foreach ($name in @('one', 'two')) { $null = New-Item -ItemType Directory -Path (Join-Path $profiles $name) -Force }
     $env:GPT_MESSAGE_TEST_ROOT = $profiles
-    $registry = Join-Path $usage 'profiles/company.json'
-    [IO.File]::WriteAllText($registry, '{}')
     $fakeModule = @'
 $script:EdgeArguments = @('--no-first-run', '--no-default-browser-check')
 function Get-GptUsageModel {
-    param([Parameter(Mandatory)][string]$RegistryPath, [switch]$RequireEdge)
-    if (-not $RequireEdge -or -not (Test-Path -LiteralPath $RegistryPath)) { throw 'Explicit registry and Edge validation are required.' }
+    param([switch]$RequireEdge)
+    if (-not $RequireEdge) { throw 'Edge validation is required.' }
     [pscustomobject]@{
         ProfileRoot = $env:GPT_MESSAGE_TEST_ROOT
         EdgePath = (Get-Command node -CommandType Application | Select-Object -First 1).Source
         Profiles = @(
             [pscustomobject]@{Id=('a' * 32);Name='one';Path=(Join-Path $env:GPT_MESSAGE_TEST_ROOT 'one')},
-            [pscustomobject]@{Id=('b' * 32);Name='two';Path=(Join-Path $env:GPT_MESSAGE_TEST_ROOT 'two')},
-            [pscustomobject]@{Id=('c' * 32);Name='archived';Path=$null}
+            [pscustomobject]@{Id=('b' * 32);Name='two';Path=(Join-Path $env:GPT_MESSAGE_TEST_ROOT 'two')}
         )
     }
 }
@@ -41,7 +43,7 @@ function Invoke-GptUsageDeviceOperation {
 function Invoke-GptUsageOpen {
     param($Model, $Profile, [scriptblock]$StartBrowser)
     if (-not $script:Held) { throw 'Device mutex must be held during discovery.' }
-    $selected = @($Model.Profiles | Where-Object { $_.Path -and (-not $Profile -or $_.Name -ceq $Profile) })
+    $selected = @($Model.Profiles | Where-Object { -not $Profile -or $_.Name -ceq $Profile })
     if ($Profile -and $selected.Count -ne 1) { throw 'Local profile not found.' }
     foreach ($entry in $selected) {
         & $StartBrowser $Model.EdgePath ('--no-first-run --user-data-dir="{0}" "https://chatgpt.com/#settings/Usage"' -f $entry.Path)
@@ -51,32 +53,30 @@ function Invoke-GptUsageOpen {
 Export-ModuleMember -Function Get-GptUsageModel
 '@
     [IO.File]::WriteAllText((Join-Path $usage 'src/GptUsage.psm1'), $fakeModule)
-    $send = Join-Path $root 'send-messages.ps1'
-    $preview = ((& $send -RegistryPath $registry -DryRun -Seed test) -join "`n") | ConvertFrom-Json
+    $send = Join-Path $product 'send-messages.ps1'
+    $preview = ((& $send -DryRun -Seed test) -join "`n") | ConvertFrom-Json
     Assert-That ($preview.profiles.Count -eq 2) 'Dry run must select only local profiles.'
     Assert-That ($preview.profiles[0].prompts.Count -eq 2) 'Default must generate two prompts.'
-    $excluded = ((& $send -RegistryPath $registry -DryRun -ExcludeProfile one) -join "`n") | ConvertFrom-Json
+    $excluded = ((& $send -DryRun -ExcludeProfile one) -join "`n") | ConvertFrom-Json
     Assert-That ($excluded.profiles.Count -eq 1 -and $excluded.profiles[0].name -eq 'two') 'Completed profiles must be excludable.'
-    $selected = ((& $send -RegistryPath $registry -DryRun -Profile two -QuestionCount 7 -Seed test) -join "`n") | ConvertFrom-Json
+    $selected = ((& $send -DryRun -Profile two -QuestionCount 7 -Seed test) -join "`n") | ConvertFrom-Json
     Assert-That ($selected.profiles.Count -eq 1 -and $selected.profiles[0].name -eq 'two') 'Profile filter was lost.'
     Assert-That ($selected.profiles[0].prompts.Count -eq 7) 'Counts above the old limit must reach the generator.'
-    $full = ((& $send -RegistryPath $registry -DryRun -Profile one -QuestionCount $MaxPrompts -Seed test) -join "`n") | ConvertFrom-Json
+    $full = ((& $send -DryRun -Profile one -QuestionCount $MaxPrompts -Seed test) -join "`n") | ConvertFrom-Json
     Assert-That ($full.profiles[0].prompts.Count -eq $MaxPrompts) 'The catalog must determine the upper count limit.'
     Assert-That (@($full.profiles[0].prompts.id | Select-Object -Unique).Count -eq $MaxPrompts) 'Templates must not repeat.'
     Assert-That (@($full.profiles[0].prompts | Where-Object text -Like '@create image*').Count -ge 3) 'Image prompt text was lost.'
     Assert-That (@($full.profiles[0].prompts | Where-Object text -Like 'Codexを社内で導入検討している.*').Count -ge 3) 'Codex adoption prompt text was lost.'
     foreach ($arguments in @(
-        @{RegistryPath=$registry;Profile='missing'},
-        @{RegistryPath=$registry;ExcludeProfile=@('one','two')},
-        @{RegistryPath='relative.json'},
-        @{RegistryPath=(Join-Path $usage 'profiles/missing.json')},
-        @{RegistryPath=$registry;QuestionCount=0},
-        @{RegistryPath=$registry;QuestionCount=-1},
-        @{RegistryPath=$registry;QuestionCount=1.5},
-        @{RegistryPath=$registry;QuestionCount='NaN'},
-        @{RegistryPath=$registry;QuestionCount='Infinity'},
-        @{RegistryPath=$registry;QuestionCount='invalid'},
-        @{RegistryPath=$registry;QuestionCount=($MaxPrompts + 1)}
+        @{Profile='missing'},
+        @{ExcludeProfile=@('one','two')},
+        @{QuestionCount=0},
+        @{QuestionCount=-1},
+        @{QuestionCount=1.5},
+        @{QuestionCount='NaN'},
+        @{QuestionCount='Infinity'},
+        @{QuestionCount='invalid'},
+        @{QuestionCount=($MaxPrompts + 1)}
     )) {
         $rejected = $false
         try { & $send @arguments -DryRun }
@@ -86,7 +86,7 @@ Export-ModuleMember -Function Get-GptUsageModel
     $nodeFailure = Join-Path $temporary 'node-fails.cmd'
     [IO.File]::WriteAllText($nodeFailure, "@exit /b 7`r`n")
     $rejected = $false
-    try { & $send -RegistryPath $registry -DryRun -NodePath $nodeFailure }
+    try { & $send -DryRun -NodePath $nodeFailure }
     catch { $rejected = $_.Exception.Message -match 'exit code 7' }
     Assert-That $rejected 'Node failures must propagate.'
     Write-Host 'PowerShell adapter tests: OK (offline only).'
@@ -94,5 +94,7 @@ Export-ModuleMember -Function Get-GptUsageModel
 finally {
     $env:GPT_MESSAGE_TEST_ROOT = $previousRoot
     Remove-Module GptUsage -Force -ErrorAction SilentlyContinue
+    $junction = Join-Path $temporary 'gpt-send-messages/node_modules'
+    if (Test-Path -LiteralPath $junction) { Remove-Item -LiteralPath $junction }
     if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
 }
