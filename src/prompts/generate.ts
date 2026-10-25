@@ -6,19 +6,25 @@ export interface Prompt {
   text: string;
 }
 
-export const maxPrompts = promptKinds.reduce((total, kind) =>
-  total + kind.parts.reduce((combinations, parts) => combinations * parts.length, 1), 0);
+export const maxPrompts = promptKinds.reduce((total, kind) => total + kind.prompts.length, 0);
 
-/** Combine meaningful clauses locally. No prompt history or network is used. */
 export function generatePrompts(profileId: string, seed: string, count = 5): Prompt[] {
   if (!Number.isInteger(count) || count < 1 || count > maxPrompts) {
     throw new Error(`Prompt count must be between 1 and ${maxPrompts}.`);
   }
-  return Array.from({ length: count }, (_, index) => {
-    const choice = createHash('sha256').update(JSON.stringify([seed, profileId, index])).digest();
-    const kind = promptKinds[choice.readUInt32LE(0) % promptKinds.length]!;
-    const indices = kind.parts.map((parts, part) => choice.readUInt32LE((part + 1) * 4) % parts.length);
-    const parts = kind.parts.map((options, part) => options[indices[part]!]!);
-    return { id: `${kind.id}-${indices.join('')}`, text: kind.prefix + parts.join(', ') + kind.ending };
-  });
+  const groups = promptKinds.map(kind => kind.prompts.map(prompt => ({
+    id: `${kind.id}-${prompt.id}`,
+    text: kind.prefix + prompt.text,
+    rank: createHash('sha256').update(JSON.stringify([seed, profileId, kind.id, prompt.id])).digest('hex'),
+  })).sort((a, b) => a.rank.localeCompare(b.rank)))
+    .sort((a, b) => a[0]!.rank.localeCompare(b[0]!.rank));
+
+  const prompts: Prompt[] = [];
+  for (let round = 0; prompts.length < count; round++) {
+    for (const group of groups) {
+      const prompt = group[round];
+      if (prompt && prompts.length < count) prompts.push({ id: prompt.id, text: prompt.text });
+    }
+  }
+  return prompts;
 }

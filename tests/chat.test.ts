@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 import { AccessBlockedError, NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.js';
-import { generatePrompts, type Prompt } from '../src/prompts/generate.js';
+import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.js';
 
 const edge = process.env.EDGE_EXECUTABLE ?? (process.platform === 'win32'
   ? join(process.env['ProgramFiles(x86)'] ?? 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe')
@@ -153,9 +153,10 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       assert.equal(sent[0]!.replace(/\s+/g, ' '), prompt.text.replace(/\s+/g, ' '));
       assert.equal(sent[1], 'Next modern question');
     });
-    await t.test('image and Codex prompt bodies reach the local fixture without code review wrapping', async () => {
-      const generated = generatePrompts('a', 'mixed-chat', 100);
-      const prompts = [generated.find(item => item.id.startsWith('image-'))!,
+    await t.test('complete code review, image, and Codex prompts reach both composer variants', async () => {
+      const generated = generatePrompts('a', 'mixed-chat', maxPrompts);
+      const prompts = [generated.find(item => item.id.startsWith('code-review-'))!,
+        generated.find(item => item.id.startsWith('image-'))!,
         generated.find(item => item.id.startsWith('codex-'))!];
       assert.ok(prompts.every(Boolean));
       for (const value of ['normal', 'modern']) {

@@ -37,7 +37,7 @@ test('manifest and CLI use existing dedicated directories only', async t => {
       encoding: 'utf8', timeout: 10_000, env: { ...process.env, LOCALAPPDATA: localAppData },
     });
     await t.test('dry-run uses the generator for default and larger batches without recording history', () => {
-      for (const count of [5, 1, 2, 13, 100]) {
+      for (const count of [5, 1, 2, 13, maxPrompts]) {
         const result = run('--dry-run', ...(count === 5 ? [] : ['--questions', String(count)]));
         assert.equal(result.error, undefined);
         assert.equal(result.status, 0, result.stdout + result.stderr);
