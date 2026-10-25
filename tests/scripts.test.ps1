@@ -62,11 +62,13 @@ Export-ModuleMember -Function Get-GptUsageModel
     $selected = ((& $send -DryRun -Profile two -QuestionCount 7 -Seed test) -join "`n") | ConvertFrom-Json
     Assert-That ($selected.profiles.Count -eq 1 -and $selected.profiles[0].name -eq 'two') 'Profile filter was lost.'
     Assert-That ($selected.profiles[0].prompts.Count -eq 7) 'Counts above the old limit must reach the generator.'
-    $full = ((& $send -DryRun -Profile one -QuestionCount $MaxPrompts -Seed test) -join "`n") | ConvertFrom-Json
-    Assert-That ($full.profiles[0].prompts.Count -eq $MaxPrompts) 'The catalog must determine the upper count limit.'
-    Assert-That (@($full.profiles[0].prompts.id | Select-Object -Unique).Count -eq $MaxPrompts) 'Templates must not repeat.'
-    Assert-That (@($full.profiles[0].prompts | Where-Object text -Like '@create image*').Count -ge 3) 'Image prompt text was lost.'
-    Assert-That (@($full.profiles[0].prompts | Where-Object text -Like 'Codexを社内で導入検討している.*').Count -ge 3) 'Codex adoption prompt text was lost.'
+    $sample = ((& $send -DryRun -Profile one -QuestionCount 100 -Seed test) -join "`n") | ConvertFrom-Json
+    Assert-That ($sample.profiles[0].prompts.Count -eq 100) 'Larger batches must reach the generator.'
+    Assert-That (@($sample.profiles[0].prompts | Where-Object text -Like '@create image*').Count -gt 0) 'Image prompt text was lost.'
+    Assert-That (@($sample.profiles[0].prompts | Where-Object text -Like 'Codexを社内で導入検討している.*').Count -gt 0) 'Codex adoption prompt text was lost.'
+    foreach ($prompt in $sample.profiles[0].prompts) {
+        Assert-That (($prompt.text -split ', ').Count -eq 4) 'Prompts must contain four comma-separated parts.'
+    }
     foreach ($arguments in @(
         @{Profile='missing'},
         @{ExcludeProfile=@('one','two')},

@@ -3,6 +3,7 @@ import type { Prompt } from './prompts/generate.js';
 
 export class AccessBlockedError extends Error {}
 export class ProfileNotReadyError extends Error {}
+export class NonFreeAccountError extends Error {}
 
 export interface ChatOptions {
   url?: string;
@@ -31,6 +32,9 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
   let httpBlock: string | undefined;
   let nativeIdentity = false;
   let identityRevision = 0;
+  let accountPlan: 'unknown' | 'free' | 'non-free' = 'unknown';
+  let planRevision = 0;
+  const hasFreePlan = () => accountPlan === 'free';
   const onResponse = (response: Response) => {
     const target = new URL(response.url());
     const request = response.request();
@@ -52,6 +56,27 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
         }).catch(() => {}); // Missing/invalid identity remains unconfirmed and cannot send.
       }
     }
+    if (target.pathname.startsWith('/backend-api/accounts/check/')) {
+      accountPlan = 'unknown';
+      const observedRevision = ++planRevision;
+      if (response.status() === 200) {
+        void response.json().then((value: unknown) => {
+          if (planRevision !== observedRevision || value === null || typeof value !== 'object' ||
+              !('accounts' in value) || value.accounts === null || typeof value.accounts !== 'object' ||
+              Array.isArray(value.accounts)) return;
+          const plans = Object.values(value.accounts).map((entry: unknown) =>
+            entry !== null && typeof entry === 'object' && 'account' in entry &&
+            entry.account !== null && typeof entry.account === 'object' && 'plan_type' in entry.account
+              ? entry.account.plan_type : undefined);
+          // Require positive free evidence for every available account/workspace.
+          if (plans.some(plan => typeof plan === 'string' && plan.length > 0 && plan !== 'free')) {
+            accountPlan = 'non-free';
+          } else if (plans.length > 0 && plans.every(plan => plan === 'free')) {
+            accountPlan = 'free';
+          }
+        }).catch(() => {});
+      }
+    }
   };
   page.on('response', onResponse);
   const stopped = page.getByTestId('stop-button').or(page.getByRole('button', { name: stopName })).first();
@@ -64,6 +89,7 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
         await page.locator('iframe[src*="challenges.cloudflare.com"]').first().isVisible()) {
       throw new AccessBlockedError('Challenge or usage limit detected. Stopping the batch.');
     }
+    if (accountPlan === 'non-free') throw new NonFreeAccountError('Non-free account detected; this profile will be skipped.');
     if (await page.getByRole('button', { name: loginName }).or(
       page.getByRole('link', { name: loginName })).first().isVisible()) {
       throw new ProfileNotReadyError('Login required; manual login is needed.');
@@ -83,18 +109,21 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
     for (const prompt of prompts) {
       identityRevision++;
       nativeIdentity = false;
+      planRevision++;
+      accountPlan = 'unknown';
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: readyTimeoutMs });
       const composer = page.locator('#prompt-textarea').or(page.getByRole('textbox', {
         name: /ChatGPT に聞く|Ask anything|Ask ChatGPT|Message ChatGPT/i,
       })).filter({ visible: true }).first();
-      const readiness = { signedIn: false, composerVisible: false, composerEditable: false, generating: false };
+      const readiness = { signedIn: false, freePlan: false, composerVisible: false, composerEditable: false, generating: false };
       try {
         await waitUntil(async () => {
           readiness.signedIn = nativeIdentity;
+          readiness.freePlan = hasFreePlan();
           readiness.composerVisible = await composer.isVisible();
           readiness.composerEditable = readiness.composerVisible && await composer.isEditable();
           readiness.generating = await stopped.isVisible();
-          return readiness.signedIn && readiness.composerEditable && !readiness.generating;
+          return readiness.signedIn && readiness.freePlan && readiness.composerEditable && !readiness.generating;
         }, readyTimeoutMs, 'Signed-in composer');
       } catch (error) {
         if (error instanceof Error && error.message.startsWith('Signed-in composer timed out')) {
@@ -112,10 +141,11 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       await waitUntil(async () => await send.isVisible() && await send.isEnabled(), readyTimeoutMs, 'Send control');
       await options.beforeSend?.();
       await guard();
-      if (!nativeIdentity) throw new ProfileNotReadyError('Native login identity is no longer confirmed; no message will be sent.');
       if ((await composerText(composer)).replaceAll('\r\n', '\n') !== filledText.replaceAll('\r\n', '\n')) {
         throw new ProfileNotReadyError('Composer changed before sending; no message will be sent.');
       }
+      if (!nativeIdentity) throw new ProfileNotReadyError('Native login identity is no longer confirmed; no message will be sent.');
+      if (!hasFreePlan()) throw new ProfileNotReadyError('Free account plan is no longer confirmed; no message will be sent.');
       options.onEvent?.('sending', prompt);
       let acknowledgement: Response;
       try {
@@ -141,6 +171,7 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
     }
   } finally {
     identityRevision++;
+    planRevision++;
     page.off('response', onResponse);
   }
 }

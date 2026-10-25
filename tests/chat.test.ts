@@ -1,22 +1,25 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
-import { AccessBlockedError, ProfileNotReadyError, runChat } from '../src/chat.js';
-import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.js';
+import { AccessBlockedError, NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.js';
+import { generatePrompts, type Prompt } from '../src/prompts/generate.js';
 
 const edge = process.env.EDGE_EXECUTABLE ?? (process.platform === 'win32'
   ? join(process.env['ProgramFiles(x86)'] ?? 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe')
   : chromium.executablePath());
 const prompt: Prompt = { id: 'test', text: 'Review this:\n```ts\nconst n = 3;\n```' };
+const accountCheck = '/backend-api/accounts/check/v4-2023-04-27';
 
 function fixture(mode: string): string {
   return `<!doctype html><html><head><title>Local chat fixture</title></head><body>
   ${['login', 'conflicting-login'].includes(mode) ? '<button>ログイン</button>' : mode === 'collapsed' ? '' : mode === 'modern'
     ? '<button aria-label="プロフィールメニューを開く">プロフィールを読み込み中</button><button aria-label="プロフィールメニューを開く"></button>'
-    : '<button data-testid="accounts-profile-button">Account</button>'}
+    : `<button data-testid="accounts-profile-button">${mode === 'plan-plus-ui-free' ? 'Free' : mode === 'plan-free-ui-plus' ? 'Plus' : 'Account'}</button>`}
   ${mode === 'modern' ? '<div id="prompt-textarea" contenteditable="true" style="display:none"></div>' : ''}
   <div ${mode === 'modern' ? '' : 'id="prompt-textarea"'} contenteditable="true" role="textbox" aria-label="ChatGPT に聞く">${mode === 'draft' ? 'Existing draft' : ''}</div>
   <button aria-label="送信" disabled>Send</button>
@@ -24,6 +27,7 @@ function fixture(mode: string): string {
   <script>
     const mode = ${JSON.stringify(mode)};
     if (mode !== 'identity-missing') fetch('/backend-api/me');
+    if (mode !== 'plan-missing') fetch('${accountCheck}?timezone_offset_min=0');
     const composer = document.querySelector('[role="textbox"]');
     if (mode === 'modern') composer.addEventListener('input', () => {
       const paragraphs = composer.innerText.split('\\n').map(line => {
@@ -64,6 +68,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   const sent: string[] = [];
   let mode = 'normal';
   let identityRequests = 0;
+  let planRequests = 0;
   const server = createServer(async (request, response) => {
     if (request.url === '/backend-api/me') {
       identityRequests++;
@@ -72,6 +77,33 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       response.writeHead(status, { 'content-type': 'application/json' });
       response.end(mode === 'identity-invalid' ? 'invalid-json'
         : JSON.stringify(mode === 'identity-no-email' ? {} : { email: 'fixture@example.test' }));
+    } else if (request.url?.startsWith(accountCheck)) {
+      planRequests++;
+      const requestMode = mode;
+      const status = requestMode === 'plan-forbidden' ? 403 : requestMode === 'plan-limited' ? 429
+        : requestMode === 'plan-unauthorized' ? 401 : requestMode === 'plan-error' ? 500 : 200;
+      const paid = ['plus', 'go', 'pro', 'team', 'enterprise', 'future'].find(plan => requestMode === `plan-${plan}`);
+      const planType = paid ?? (requestMode === 'plan-plus-ui-free' || (requestMode === 'plan-expires' && planRequests > 1)
+        ? 'plus' : 'free');
+      const free = { account: { plan_type: 'free' } };
+      const bodies: Record<string, unknown> = {
+        'plan-null': null,
+        'plan-no-accounts': {},
+        'plan-empty': { accounts: {} },
+        'plan-array': { accounts: [free] },
+        'plan-no-type': { accounts: { default: { account: {} } } },
+        'plan-invalid-type': { accounts: { default: { account: { plan_type: false } } } },
+        'plan-partial': { accounts: { default: free, other: {} } },
+        'plan-mixed': { accounts: { default: free, other: { account: { plan_type: 'plus' } } } },
+      };
+      const body = requestMode in bodies ? bodies[requestMode] : { accounts: { default: { account: { plan_type: planType } } } };
+      if (requestMode === 'plan-delayed') await new Promise(resolve => setTimeout(resolve, 150));
+      response.writeHead(status, { 'content-type': 'application/json' });
+      if (requestMode === 'plan-pending') {
+        response.flushHeaders();
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }
+      response.end(requestMode === 'plan-invalid' ? 'invalid-json' : JSON.stringify(body));
     } else if (request.url === '/backend-api/f/conversation') {
       let body = '';
       for await (const chunk of request) body += String(chunk);
@@ -119,9 +151,10 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       assert.equal(sent[1], 'Next modern question');
     });
     await t.test('image and Codex prompt bodies reach the local fixture without code review wrapping', async () => {
-      const prompts = generatePrompts('a', 'mixed-chat', maxPrompts).filter(item =>
-        item.id === 'image-presentation-cover' || item.id === 'codex-pilot');
-      assert.equal(prompts.length, 2);
+      const generated = generatePrompts('a', 'mixed-chat', 100);
+      const prompts = [generated.find(item => item.id.startsWith('image-'))!,
+        generated.find(item => item.id.startsWith('codex-'))!];
+      assert.ok(prompts.every(Boolean));
       for (const value of ['normal', 'modern']) {
         mode = value; sent.length = 0;
         await runChat(page, prompts, options);
@@ -143,6 +176,84 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       mode = 'collapsed'; sent.length = 0;
       await runChat(page, [prompt], options);
       assert.deepEqual(sent, [prompt.text]);
+    });
+    await t.test('paid plans are skipped without filling, sending, or consuming the send delay', async () => {
+      for (const value of ['plan-plus', 'plan-go', 'plan-pro', 'plan-team', 'plan-enterprise', 'plan-future', 'plan-mixed', 'plan-plus-ui-free']) {
+        mode = value; sent.length = 0;
+        const events: string[] = [];
+        let beforeSend = false;
+        await assert.rejects(runChat(page, [prompt, prompt], {
+          ...options, beforeSend: async () => { beforeSend = true; }, onEvent: event => events.push(event),
+        }), NonFreeAccountError);
+        assert.equal(sent.length, 0, value);
+        assert.equal(await page.getByRole('textbox').innerText(), '', value);
+        assert.equal(beforeSend, false, value);
+        assert.deepEqual(events, [], value);
+      }
+    });
+    await t.test('missing, malformed, unauthorized, or incomplete plans never permit submission', async () => {
+      for (const value of ['plan-missing', 'plan-invalid', 'plan-null', 'plan-no-accounts', 'plan-empty',
+        'plan-array', 'plan-no-type', 'plan-invalid-type', 'plan-partial', 'plan-unauthorized', 'plan-error']) {
+        mode = value; sent.length = 0;
+        await assert.rejects(runChat(page, [prompt], { ...options, readyTimeoutMs: 350 }), ProfileNotReadyError);
+        assert.equal(sent.length, 0, value);
+        assert.equal(await page.getByRole('textbox').innerText(), '', value);
+      }
+    });
+    await t.test('a delayed free plan and misleading sidebar label do not replace native plan checks', async () => {
+      for (const value of ['plan-delayed', 'plan-free-ui-plus']) {
+        mode = value; sent.length = 0; planRequests = 0;
+        await runChat(page, [prompt], options);
+        assert.deepEqual(sent, [prompt.text], value);
+        assert.equal(planRequests, 1, 'The runner must only observe the app request, not issue its own.');
+      }
+    });
+    await t.test('the free plan is revalidated for every new chat', async () => {
+      mode = 'plan-expires'; sent.length = 0; planRequests = 0;
+      await assert.rejects(runChat(page, [prompt, prompt], options), NonFreeAccountError);
+      assert.deepEqual(sent, [prompt.text]);
+      assert.equal(planRequests, 2);
+    });
+    await t.test('a paid or unconfirmed plan after filling stops before clicking Send', async () => {
+      for (const value of ['plan-plus', 'plan-unauthorized', 'plan-invalid', 'plan-pending']) {
+        mode = 'normal'; sent.length = 0;
+        const events: string[] = [];
+        await assert.rejects(runChat(page, [prompt], {
+          ...options, onEvent: event => events.push(event), beforeSend: async () => {
+            mode = value;
+            const response = page.waitForResponse(response => new URL(response.url()).pathname === accountCheck);
+            await page.evaluate(async path => { await fetch(path); }, accountCheck);
+            if (value !== 'plan-pending') await (await response).body();
+          },
+        }), value === 'plan-plus' ? NonFreeAccountError : ProfileNotReadyError);
+        assert.equal(sent.length, 0, value);
+        assert.deepEqual(events, [], value);
+      }
+    });
+    await t.test('a late free-plan body cannot overwrite a newer paid or unauthorized response', async () => {
+      for (const value of ['plan-plus', 'plan-unauthorized']) {
+        mode = 'normal'; sent.length = 0;
+        await assert.rejects(runChat(page, [prompt], {
+          ...options, beforeSend: async () => {
+            mode = 'plan-pending';
+            const old = page.waitForResponse(response => new URL(response.url()).pathname === accountCheck);
+            await page.evaluate(async path => { await fetch(path); }, accountCheck);
+            mode = value;
+            const latest = page.waitForResponse(response => new URL(response.url()).pathname === accountCheck);
+            await page.evaluate(async path => { await fetch(path); }, accountCheck);
+            await (await latest).body();
+            await (await old).body();
+          },
+        }), value === 'plan-plus' ? NonFreeAccountError : ProfileNotReadyError);
+        assert.equal(sent.length, 0, value);
+      }
+    });
+    await t.test('403 and 429 plan responses stop the batch before submission', async () => {
+      for (const value of ['plan-forbidden', 'plan-limited']) {
+        mode = value; sent.length = 0;
+        await assert.rejects(runChat(page, [prompt], options), AccessBlockedError);
+        assert.equal(sent.length, 0);
+      }
     });
     await t.test('profile controls cannot replace a missing, invalid, or unauthorized native identity', async () => {
       for (const value of ['identity-missing', 'identity-invalid', 'identity-no-email', 'identity-unauthorized', 'conflicting-login']) {
@@ -246,6 +357,79 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
     await context.close();
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test('the CLI skips paid profiles successfully, continues to free profiles, and stops the batch on access blocks', () => {
+  const temporary = mkdtempSync('C:/dev/tmp/gpt-message-cli-test-');
+  try {
+    const preload = join(temporary, 'fixture.mjs');
+    writeFileSync(preload, `
+      import { basename } from 'node:path';
+      import { chromium } from ${JSON.stringify(import.meta.resolve('playwright'))};
+      const launch = chromium.launchPersistentContext.bind(chromium);
+      chromium.launchPersistentContext = async (directory, options) => {
+        const name = basename(directory);
+        const context = await launch(directory, { ...options, headless: true });
+        await context.route('**/*', async route => {
+          const target = new URL(route.request().url());
+          if (target.origin !== 'https://chatgpt.com') return route.abort();
+          if (target.pathname === '/backend-api/me') {
+            return route.fulfill({ json: { email: 'fixture@example.test' } });
+          }
+          if (target.pathname.startsWith('/backend-api/accounts/check/')) {
+            return route.fulfill({ json: { accounts: { default: { account: { plan_type: name === 'paid' ? 'plus' : 'free' } } } } });
+          }
+          if (target.pathname === '/backend-api/f/conversation') {
+            console.log(JSON.stringify({ event: 'fixture-submitted', profile: name }));
+            return route.fulfill({ status: 200, body: 'ok' });
+          }
+          if (route.request().isNavigationRequest()) {
+            return route.fulfill({ status: name === 'blocked' ? 403 : 200,
+              contentType: 'text/html; charset=utf-8', body: ${JSON.stringify(fixture('normal'))} });
+          }
+          return route.abort();
+        });
+        console.log(JSON.stringify({ event: 'fixture-profile-opened', profile: name }));
+        return context;
+      };
+    `);
+    const cli = fileURLToPath(new URL('../src/main.js', import.meta.url));
+    const scenarios = [
+      { names: ['paid', 'free'], status: 0, submitted: ['free'], skipped: ['paid'], opened: ['paid', 'free'] },
+      { names: ['paid'], status: 0, submitted: [], skipped: ['paid'], opened: ['paid'] },
+      { names: ['blocked', 'free'], status: 1, submitted: [], skipped: [], opened: ['blocked'] },
+    ];
+    for (const [index, scenario] of scenarios.entries()) {
+      const root = join(temporary, String(index), 'profiles');
+      const profiles = scenario.names.map((name, id) => {
+        const path = join(root, name);
+        mkdirSync(path, { recursive: true });
+        return { id: id.toString(16).padStart(32, '0'), name, path };
+      });
+      const manifest = join(temporary, `manifest-${index}.json`);
+      writeFileSync(manifest, JSON.stringify({
+        schemaVersion: 1, edgePath: edge, edgeArguments: ['--no-first-run', '--disable-background-networking'],
+        profileRoot: root, profiles,
+      }));
+      const localAppData = join(temporary, String(index), 'localappdata');
+      const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, '--manifest', manifest,
+        '--questions', '1', '--seed', 'fixture'], {
+        encoding: 'utf8', timeout: 30_000, env: { ...process.env, LOCALAPPDATA: localAppData },
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, scenario.status, result.stdout + result.stderr);
+      const records = result.stdout.trim().split('\n').map(line => JSON.parse(line));
+      const profilesFor = (event: string) => records.filter(record => record.event === event).map(record => record.profile);
+      assert.deepEqual(profilesFor('fixture-submitted'), scenario.submitted);
+      assert.deepEqual(profilesFor('fixture-profile-opened'), scenario.opened);
+      assert.deepEqual(profilesFor('profile-skipped'), scenario.skipped);
+      assert.equal(records.at(-1).event, 'finished');
+      assert.equal(records.at(-1).success, scenario.status === 0);
+      assert.deepEqual(readdirSync(join(localAppData, 'gpt-send-messages')), ['logs']);
+    }
+  } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
 });

@@ -36,8 +36,8 @@ test('manifest and CLI use existing dedicated directories only', async t => {
     const run = (...args: string[]) => spawnSync(process.execPath, [cli, '--manifest', file, '--seed', 'test-seed', ...args], {
       encoding: 'utf8', timeout: 10_000, env: { ...process.env, LOCALAPPDATA: localAppData },
     });
-    await t.test('dry-run uses the generator for both the default and full catalog', () => {
-      for (const count of [2, maxPrompts]) {
+    await t.test('dry-run uses the generator for default and larger batches without recording history', () => {
+      for (const count of [2, 13, 100]) {
         const result = run('--dry-run', ...(count === 2 ? [] : ['--questions', String(count)]));
         assert.equal(result.error, undefined);
         assert.equal(result.status, 0, result.stdout + result.stderr);

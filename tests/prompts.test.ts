@@ -1,74 +1,87 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { templates } from '../src/prompts/catalog.js';
+import { promptKinds } from '../src/prompts/catalog.js';
 import { generatePrompts, maxPrompts } from '../src/prompts/generate.js';
 
-const allPrompts = () => generatePrompts('a'.repeat(32), 'test-seed', maxPrompts);
+const samples = generatePrompts('a'.repeat(32), 'test-seed', 600);
 
-test('prompts are reproducible and cover the catalog without repeating templates', () => {
-  const prompts = allPrompts();
-  assert.deepEqual(prompts, allPrompts());
-  assert.equal(maxPrompts, templates.length);
-  assert.equal(prompts.length, maxPrompts);
-  assert.equal(new Set(prompts.map(prompt => prompt.id)).size, maxPrompts);
-  assert.deepEqual(new Set(prompts.map(prompt => prompt.id)), new Set(templates.map(template => template.id)));
-  for (const prompt of prompts) {
-    assert.match(prompt.id, /^[a-z0-9]+(?:-[a-z0-9]+)*$/);
-    assert.ok(prompt.text.trim().length > 0);
+test('each category has four sets of ten meaningful clauses and 10,000 distinct combinations', () => {
+  assert.deepEqual(promptKinds.map(kind => kind.id), ['code-review', 'image', 'codex']);
+  for (const kind of promptKinds) {
+    assert.equal(kind.parts.length, 4);
+    let combinations = [''];
+    for (const parts of kind.parts) {
+      assert.equal(parts.length, 10);
+      assert.equal(new Set(parts).size, 10);
+      for (const part of parts) {
+        assert.equal(part, part.trim());
+        assert.doesNotMatch(part, /[,\n\u3000-\u303f\uff00-\uffef]/);
+        assert.ok(part.length > 0);
+      }
+      combinations = combinations.flatMap(prefix => parts.map(part => prefix ? `${prefix}, ${part}` : part));
+    }
+    assert.equal(combinations.length, 10_000);
+    assert.equal(new Set(combinations).size, 10_000);
+  }
+  assert.equal(maxPrompts, 30_000);
+});
+
+test('generated text contains only the four selected clauses and the category instructions', () => {
+  for (const prompt of samples) {
+    const kind = promptKinds.find(kind => prompt.id.startsWith(`${kind.id}-`));
+    assert.ok(kind);
+    const indices = prompt.id.slice(kind.id.length + 1);
+    assert.match(indices, /^[0-9]{4}$/);
+    const parts = kind.parts.map((options, part) => options[Number(indices[part])]!);
+    assert.equal(prompt.text, kind.prefix + parts.join(', ') + kind.ending);
+    assert.equal(prompt.text.split(', ').length, 4);
+    assert.doesNotMatch(prompt.text, /undefined|[a-f0-9]{32}|test-seed|code-review-[0-9]|image-[0-9]|codex-[0-9]/);
+  }
+  for (const kind of promptKinds) {
+    const selected = samples.filter(prompt => prompt.id.startsWith(`${kind.id}-`));
+    assert.ok(selected.length > 0);
+    for (let part = 0; part < 4; part++) {
+      assert.equal(new Set(selected.map(prompt => prompt.id.slice(-4)[part])).size, 10);
+    }
   }
 });
 
-test('existing code review templates retain their instructions and code blocks', () => {
-  const prompts = allPrompts();
-  for (const id of ['off-by-one', 'mutable-default', 'async-foreach', 'mutating-sort', 'late-binding', 'integer-division']) {
-    const prompt = prompts.find(item => item.id === id);
-    assert.ok(prompt, id);
-    assert.match(prompt.text, /^次のコードをレビューしてください\./);
-    assert.match(prompt.text, /```(?:typescript|python)\n[\s\S]+\n```$/);
+test('categories retain code review, literal image commands, and Codex adoption questions', () => {
+  for (const prompt of samples) {
+    if (prompt.id.startsWith('code-review-')) {
+      assert.match(prompt.text, /コードレビューについて/);
+      assert.doesNotMatch(prompt.text, /@create image|^Codex/);
+    } else if (prompt.id.startsWith('image-')) {
+      assert.match(prompt.text, /^@create image\n\S/);
+      assert.match(prompt.text, /作成してください\. 文字や企業ロゴは入れないでください\.$/);
+      assert.doesNotMatch(prompt.text, /```|^Codex/);
+    } else {
+      assert.match(prompt.text, /^Codexを社内で導入検討している\./);
+      assert.doesNotMatch(prompt.text, /@create image|```/);
+    }
   }
+  const codex = promptKinds.find(kind => kind.id === 'codex')!;
+  assert.ok(codex.parts[1].some(part => /PoC/.test(part)));
+  assert.ok(codex.parts[1].some(part => /機密情報/.test(part)));
+  assert.ok(codex.parts[1].some(part => /費用対効果/.test(part)));
 });
 
-test('image templates retain the literal command prefix without code review instructions', () => {
-  const prompts = allPrompts().filter(prompt => prompt.id.startsWith('image-'));
-  assert.ok(prompts.length >= 3);
-  assert.equal(new Set(prompts.map(prompt => prompt.text)).size, prompts.length);
-  for (const prompt of prompts) {
-    assert.match(prompt.text, /^@create image\n\S/);
-    assert.doesNotMatch(prompt.text, /次のコードをレビュー|```/);
+test('profile and seed change the selection without keeping prompt history', () => {
+  const before = structuredClone(promptKinds);
+  const expected = generatePrompts('a', 'one');
+  assert.notDeepEqual(expected, generatePrompts('b', 'one'));
+  assert.notDeepEqual(expected, generatePrompts('a', 'two'));
+  assert.deepEqual(generatePrompts('a', 'one'), expected);
+  assert.deepEqual(promptKinds, before);
+  assert.equal(expected.length, 2);
+});
+
+test('supported batch sizes retain a reproducible prefix', () => {
+  const expected = generatePrompts('a', 'batch', maxPrompts);
+  for (const count of [1, 2, 7, 13, 100]) {
+    assert.deepEqual(generatePrompts('a', 'batch', count), expected.slice(0, count));
   }
-});
-
-test('Codex adoption templates cover pilot, security, and cost discussions', () => {
-  const prompts = allPrompts();
-  for (const [id, topic] of [
-    ['codex-pilot', /PoC/],
-    ['codex-security', /セキュリティ/],
-    ['codex-cost-and-rollout', /費用対効果/],
-  ] as const) {
-    const prompt = prompts.find(item => item.id === id);
-    assert.ok(prompt, id);
-    assert.match(prompt.text, /^Codexを社内で導入検討している\./);
-    assert.match(prompt.text, topic);
-    assert.doesNotMatch(prompt.text, /次のコードをレビュー|```/);
-  }
-});
-
-test('profile and seed affect locally generated prompts', () => {
-  assert.notDeepEqual(generatePrompts('a', 'one'), generatePrompts('b', 'one'));
-  assert.notDeepEqual(generatePrompts('a', 'one'), generatePrompts('a', 'two'));
-});
-
-test('the default batch contains exactly two prompts', () => {
-  assert.equal(generatePrompts('a', 'one').length, 2);
-});
-
-test('every supported batch size works without consuming the catalog', () => {
-  const expected = allPrompts();
-  for (let count = 1; count <= maxPrompts; count++) {
-    const prompts = generatePrompts('a'.repeat(32), 'test-seed', count);
-    assert.deepEqual(prompts, expected.slice(0, count));
-  }
-  assert.deepEqual(allPrompts(), expected);
+  assert.equal(expected.length, maxPrompts);
 });
 
 test('invalid counts fail instead of sending an unexpected batch', () => {

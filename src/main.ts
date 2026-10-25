@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:pa
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { chromium, type BrowserContext, type Page } from 'playwright';
-import { AccessBlockedError, runChat } from './chat.js';
+import { AccessBlockedError, NonFreeAccountError, runChat } from './chat.js';
 import { generatePrompts } from './prompts/generate.js';
 
 interface Profile { id: string; name: string; path: string }
@@ -93,11 +93,15 @@ async function main(): Promise<void> {
         onEvent: (event, prompt) => log(event, { profile: profile.name, promptId: prompt.id, url: page.url() }),
       });
     } catch (error) {
-      failed = true;
-      log('profile-failed', { profile: profile.name, url: lastPage?.url(), error: String(error) });
-      if (error instanceof AccessBlockedError) {
-        log('batch-stopped', { reason: 'Access blocked; no other profiles will be contacted.' });
-        break;
+      if (error instanceof NonFreeAccountError) {
+        log('profile-skipped', { profile: profile.name, reason: 'non-free-account' });
+      } else {
+        failed = true;
+        log('profile-failed', { profile: profile.name, url: lastPage?.url(), error: String(error) });
+        if (error instanceof AccessBlockedError) {
+          log('batch-stopped', { reason: 'Access blocked; no other profiles will be contacted.' });
+          break;
+        }
       }
     } finally {
       // Only close a context successfully created by THIS run, never an existing user browser.
