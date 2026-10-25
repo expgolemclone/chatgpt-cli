@@ -45,11 +45,11 @@ export function readManifest(file: string): Manifest {
 
 async function main(): Promise<void> {
   const { values } = parseArgs({ options: {
-    manifest: { type: 'string' }, questions: { type: 'string', default: '2' },
+    manifest: { type: 'string' }, questions: { type: 'string' },
     seed: { type: 'string' }, 'dry-run': { type: 'boolean', default: false },
   } });
   if (!values.manifest) throw new Error('Use send-messages.ps1 to resolve local profiles.');
-  const count = Number(values.questions);
+  const count = values.questions === undefined ? undefined : Number(values.questions);
   const manifest = readManifest(values.manifest);
   const seed = values.seed ?? randomUUID();
   const batches = manifest.profiles.map(profile => ({

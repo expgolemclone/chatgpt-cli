@@ -4,7 +4,7 @@
 param(
     [string]$Profile,
     [string[]]$ExcludeProfile = @(),
-    [string]$QuestionCount = '2',
+    [string]$QuestionCount,
     [switch]$DryRun,
     [string]$Seed,
     [string]$NodePath
@@ -53,7 +53,8 @@ $module = Import-Module $modulePath -Force -PassThru
         $temporary = Join-Path 'C:/dev/tmp' ('gpt-send-messages-' + [guid]::NewGuid().ToString('N') + '.json')
         try {
             [IO.File]::WriteAllText($temporary, ($manifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
-            $arguments = @($Cli, '--manifest', $temporary, '--questions', [string]$Count)
+            $arguments = @($Cli, '--manifest', $temporary)
+            if ($null -ne $Count) { $arguments += @('--questions', [string]$Count) }
             if ($Preview) { $arguments += '--dry-run' }
             if ($RunSeed) { $arguments += @('--seed', $RunSeed) }
             & $Node @arguments
@@ -63,4 +64,4 @@ $module = Import-Module $modulePath -Force -PassThru
             if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
         }
     }
-} $Profile $ExcludeProfile $cli $NodePath $QuestionCount $DryRun.IsPresent $Seed
+} $Profile $ExcludeProfile $cli $NodePath $PSBoundParameters['QuestionCount'] $DryRun.IsPresent $Seed

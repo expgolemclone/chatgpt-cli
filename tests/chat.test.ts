@@ -134,14 +134,17 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   const page = await context.newPage();
   const options = { url, readyTimeoutMs: 2000, pollMs: 20 };
   try {
-    await t.test('clicks Send once and confirms acceptance before the next chat', async () => {
+    await t.test('sends all five default prompts once and confirms acceptance before the next chat', async () => {
       sent.length = 0; mode = 'normal';
+      const prompts = generatePrompts('a', 'default-batch');
+      assert.equal(prompts.length, 5);
       const events: string[] = [];
-      await runChat(page, [prompt, { ...prompt, id: 'second', text: 'Second question' }], {
+      await runChat(page, prompts, {
         ...options, onEvent: (event, item) => events.push(`${event}:${item.id}`),
       });
-      assert.deepEqual(sent, [prompt.text, 'Second question']);
-      assert.deepEqual(events, ['sending:test', 'sent:test', 'sending:second', 'sent:second']);
+      assert.deepEqual(sent.map(text => text.replace(/\s+/g, ' ')),
+        prompts.map(item => item.text.replace(/\s+/g, ' ')));
+      assert.deepEqual(events, prompts.flatMap(item => [`sending:${item.id}`, `sent:${item.id}`]));
     });
     await t.test('current rich-text UI works without legacy ids', async () => {
       sent.length = 0; mode = 'modern';

@@ -73,12 +73,12 @@ test('profile and seed change the selection without keeping prompt history', () 
   assert.notDeepEqual(expected, generatePrompts('a', 'two'));
   assert.deepEqual(generatePrompts('a', 'one'), expected);
   assert.deepEqual(promptKinds, before);
-  assert.equal(expected.length, 2);
+  assert.equal(expected.length, 5);
 });
 
 test('supported batch sizes retain a reproducible prefix', () => {
   const expected = generatePrompts('a', 'batch', maxPrompts);
-  for (const count of [1, 2, 7, 13, 100]) {
+  for (const count of [1, 2, 5, 7, 13, 100]) {
     assert.deepEqual(generatePrompts('a', 'batch', count), expected.slice(0, count));
   }
   assert.equal(expected.length, maxPrompts);

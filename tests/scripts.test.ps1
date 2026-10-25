@@ -56,7 +56,13 @@ Export-ModuleMember -Function Get-GptUsageModel
     $send = Join-Path $product 'send-messages.ps1'
     $preview = ((& $send -DryRun -Seed test) -join "`n") | ConvertFrom-Json
     Assert-That ($preview.profiles.Count -eq 2) 'Dry run must select only local profiles.'
-    Assert-That ($preview.profiles[0].prompts.Count -eq 2) 'Default must generate two prompts.'
+    foreach ($entry in $preview.profiles) {
+        Assert-That ($entry.prompts.Count -eq 5) 'Default must generate five prompts per profile.'
+    }
+    foreach ($count in @(1, 2)) {
+        $override = ((& $send -DryRun -Profile one -QuestionCount $count -Seed test) -join "`n") | ConvertFrom-Json
+        Assert-That ($override.profiles[0].prompts.Count -eq $count) 'Explicit counts must override the default.'
+    }
     $excluded = ((& $send -DryRun -ExcludeProfile one) -join "`n") | ConvertFrom-Json
     Assert-That ($excluded.profiles.Count -eq 1 -and $excluded.profiles[0].name -eq 'two') 'Completed profiles must be excludable.'
     $selected = ((& $send -DryRun -Profile two -QuestionCount 7 -Seed test) -join "`n") | ConvertFrom-Json
@@ -72,6 +78,7 @@ Export-ModuleMember -Function Get-GptUsageModel
     foreach ($arguments in @(
         @{Profile='missing'},
         @{ExcludeProfile=@('one','two')},
+        @{QuestionCount=''},
         @{QuestionCount=0},
         @{QuestionCount=-1},
         @{QuestionCount=1.5},

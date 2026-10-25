@@ -37,8 +37,8 @@ test('manifest and CLI use existing dedicated directories only', async t => {
       encoding: 'utf8', timeout: 10_000, env: { ...process.env, LOCALAPPDATA: localAppData },
     });
     await t.test('dry-run uses the generator for default and larger batches without recording history', () => {
-      for (const count of [2, 13, 100]) {
-        const result = run('--dry-run', ...(count === 2 ? [] : ['--questions', String(count)]));
+      for (const count of [5, 1, 2, 13, 100]) {
+        const result = run('--dry-run', ...(count === 5 ? [] : ['--questions', String(count)]));
         assert.equal(result.error, undefined);
         assert.equal(result.status, 0, result.stdout + result.stderr);
         assert.deepEqual(JSON.parse(result.stdout), {
@@ -49,7 +49,7 @@ test('manifest and CLI use existing dedicated directories only', async t => {
       }
     });
     await t.test('invalid counts fail before the live path creates logs or launches a browser', () => {
-      for (const count of ['0', '-1', '1.5', 'NaN', 'Infinity', '-Infinity', 'invalid', String(maxPrompts + 1)]) {
+      for (const count of ['', '0', '-1', '1.5', 'NaN', 'Infinity', '-Infinity', 'invalid', String(maxPrompts + 1)]) {
         const result = run(`--questions=${count}`);
         assert.equal(result.error, undefined);
         assert.equal(result.status, 1, result.stdout + result.stderr);

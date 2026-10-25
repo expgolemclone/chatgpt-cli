@@ -10,7 +10,7 @@ export const maxPrompts = promptKinds.reduce((total, kind) =>
   total + kind.parts.reduce((combinations, parts) => combinations * parts.length, 1), 0);
 
 /** Combine meaningful clauses locally. No prompt history or network is used. */
-export function generatePrompts(profileId: string, seed: string, count = 2): Prompt[] {
+export function generatePrompts(profileId: string, seed: string, count = 5): Prompt[] {
   if (!Number.isInteger(count) || count < 1 || count > maxPrompts) {
     throw new Error(`Prompt count must be between 1 and ${maxPrompts}.`);
   }
