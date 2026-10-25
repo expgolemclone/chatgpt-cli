@@ -7,11 +7,9 @@ export class ProfileNotReadyError extends Error {}
 export interface ChatOptions {
   url?: string;
   readyTimeoutMs?: number;
-  responseTimeoutMs?: number;
   pollMs?: number;
-  stableMs?: number;
   beforeSend?: () => Promise<void>;
-  onEvent?: (event: 'sending' | 'completed', prompt: Prompt) => void;
+  onEvent?: (event: 'sending' | 'sent', prompt: Prompt) => void;
 }
 
 const stopName = /^(Stop generating|Stop streaming|生成を停止する|生成を停止|停止)$/i;
@@ -24,12 +22,11 @@ async function composerText(composer: Locator): Promise<string> {
       ? element.value : element instanceof HTMLElement ? element.innerText : element.textContent ?? '');
 }
 
-/** New chat for every prompt. Submit exactly once through the enabled Send control. */
+/** New chat for every prompt. Submit once, confirm acceptance, and never wait for an answer. */
 export async function runChat(page: Page, prompts: Prompt[], options: ChatOptions = {}): Promise<void> {
   const url = options.url ?? 'https://chatgpt.com/';
   const origin = new URL(url).origin;
   const pollMs = options.pollMs ?? 500;
-  const stableMs = options.stableMs ?? 1500;
   const readyTimeoutMs = options.readyTimeoutMs ?? 60_000;
   let httpBlock: string | undefined;
   let nativeIdentity = false;
@@ -105,10 +102,6 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
         }
         throw error;
       }
-      const users = page.locator('[data-message-author-role="user"], [data-user-message-bubble]');
-      const assistants = page.locator('[data-message-author-role="assistant"], [data-content-search-unit-key$=":assistant"]');
-      const previousUsers = await users.count();
-      const previousAssistants = await assistants.count();
       await composer.fill(prompt.text); // Replace any existing draft instead of appending to it.
       // The rich-text editor normalizes paragraphs/blank lines during fill. Compare its
       // post-fill state, not the original plain text, to detect later manual edits.
@@ -123,52 +116,28 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       if ((await composerText(composer)).replaceAll('\r\n', '\n') !== filledText.replaceAll('\r\n', '\n')) {
         throw new ProfileNotReadyError('Composer changed before sending; no message will be sent.');
       }
-      const beforeSubmitUrl = page.url();
       options.onEvent?.('sending', prompt);
-      await send.click({ timeout: readyTimeoutMs }); // Never retry an uncertain submission.
-      const timeout = options.responseTimeoutMs ?? 300_000;
+      let acknowledgement: Response;
       try {
-        await waitUntil(async () => {
-          const current = new URL(page.url());
-          const newConversation = current.origin === origin &&
-            /^\/c\/[a-f0-9-]+$/i.test(current.pathname) && page.url() !== beforeSubmitUrl;
-          return (await users.count() > previousUsers || newConversation) &&
-            !(await composerText(composer)).trim();
-        }, readyTimeoutMs, 'Submission acknowledgement');
+        // UI updates are optimistic. Wait only for the app's submission response headers,
+        // never its streaming body or the assistant's rendered answer.
+        [acknowledgement] = await Promise.all([
+          page.waitForResponse(response => {
+            const target = new URL(response.url());
+            return target.origin === origin && target.pathname === '/backend-api/f/conversation' &&
+              response.request().method() === 'POST';
+          }, { timeout: readyTimeoutMs }),
+          send.click({ timeout: readyTimeoutMs }), // Never retry an uncertain submission.
+        ]);
       } catch (error) {
-        if (error instanceof Error && error.message.startsWith('Submission acknowledgement timed out')) {
-          throw new Error(`${error.message} URL: ${page.url()}; user messages: ${await users.count()}; composer length: ${(await composerText(composer)).trim().length}`);
-        }
-        throw error;
+        await guard();
+        throw new Error(`Submission acknowledgement failed. No automatic resend will be attempted. ${String(error)}`);
       }
-
-      let previousContent = '';
-      let stableSince = Date.now();
-      await waitUntil(async () => {
-        if (await assistants.count() <= previousAssistants || await stopped.isVisible()) {
-          stableSince = Date.now();
-          return false;
-        }
-        const last = assistants.last();
-        const rendered = last.locator('[data-dil-message-id]').last();
-        const content = await rendered.count() ? await rendered.innerText() : await last.innerText();
-        // The current shell marks the turn complete before its answer finishes rendering.
-        // Require its response-level Copy action as well; code-block Copy is not sufficient.
-        const turn = page.locator('[data-testid^="conversation-turn-"], [data-talvt-turn-state]')
-          .filter({ has: last }).last();
-        const complete = await turn.getByTestId('copy-turn-action-button').isVisible() ||
-          (await turn.getAttribute('data-talvt-turn-state') === 'complete' &&
-            await turn.getByRole('button', { name: /^(コピーする|Copy|Copy response)$/i })
-              .filter({ visible: true }).first().isVisible());
-        const fingerprint = content;
-        if (fingerprint !== previousContent || !complete) {
-          previousContent = fingerprint;
-          stableSince = Date.now();
-        }
-        const hasAnswer = content.trim().length > 0;
-        return hasAnswer && complete && Date.now() - stableSince >= stableMs;
-      }, timeout, 'Assistant response completion');
-      options.onEvent?.('completed', prompt);
+      await guard();
+      if (!acknowledgement.ok()) {
+        throw new Error(`Submission rejected: HTTP ${acknowledgement.status()}. No automatic resend will be attempted.`);
+      }
+      options.onEvent?.('sent', prompt);
     }
   } finally {
     identityRevision++;

@@ -37,37 +37,24 @@ function fixture(mode: string): string {
     });
     send.addEventListener('click', () => {
       const text = composer.innerText;
-      fetch('/sent', {method: 'POST', body: text});
+      fetch('/backend-api/f/conversation', {method: 'POST', body: text});
+      if (mode === 'no-dom-ack') return;
       const user = document.createElement('div');
       if (mode === 'modern') user.dataset.userMessageBubble = 'true';
-      else if (mode !== 'url-ack') user.dataset.messageAuthorRole = 'user';
-      if (mode === 'url-ack') history.pushState(null, '', '/c/11111111-1111-4111-8111-111111111111');
+      else user.dataset.messageAuthorRole = 'user';
       user.textContent = text;
       document.querySelector('main').append(user);
       composer.textContent = '';
-      if (mode === 'no-answer') return;
-      if (mode === 'limit') { document.body.append("You've reached the usage limit"); return; }
-      const turn = document.createElement('article');
-      if (mode === 'modern') turn.dataset.talvtTurnState = 'complete';
-      else turn.dataset.testid = 'conversation-turn-1';
-      const assistant = document.createElement('div');
-      if (mode === 'modern') assistant.dataset.contentSearchUnitKey = 'fallback-turn-0:2:assistant';
-      else assistant.dataset.messageAuthorRole = 'assistant';
-      assistant.textContent = 'Working...';
-      turn.append(assistant); document.querySelector('main').append(turn);
-      // A gap without a stop button must NOT be mistaken for completion.
-      setTimeout(() => {
+      if (mode === 'generating') {
         const stop = document.createElement('button'); stop.dataset.testid = 'stop-button';
-        stop.textContent = 'Stop generating'; document.body.append(stop);
-        setTimeout(() => {
-          assistant.textContent = 'Final answer';
-          stop.remove();
-          const copy = document.createElement('button');
-          if (mode === 'modern') copy.setAttribute('aria-label', 'コピーする');
-          else copy.dataset.testid = 'copy-turn-action-button';
-          copy.textContent = 'Copy'; turn.append(copy);
-        }, 150);
-      }, 100);
+        document.body.append(stop); return;
+      }
+      if (mode === 'image-only') {
+        document.querySelector('main').insertAdjacentHTML('beforeend',
+          '<div data-talvt-turn-state="complete"><button data-testid="generated-image-preview"><img alt="生成画像1" src="data:image/png;base64,broken"></button></div>');
+        return;
+      }
+      if (mode === 'limit') document.body.append("You've reached the usage limit");
     });
   </script></body></html>`;
 }
@@ -85,10 +72,21 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       response.writeHead(status, { 'content-type': 'application/json' });
       response.end(mode === 'identity-invalid' ? 'invalid-json'
         : JSON.stringify(mode === 'identity-no-email' ? {} : { email: 'fixture@example.test' }));
-    } else if (request.url === '/sent') {
+    } else if (request.url === '/backend-api/f/conversation') {
       let body = '';
       for await (const chunk of request) body += String(chunk);
       sent.push(body);
+      if (mode === 'no-ack') return;
+      if (mode === 'streaming-response') {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.flushHeaders();
+        response.write('data: started\n\n'); // Deliberately never finish the answer stream.
+        return;
+      }
+      const status = mode === 'submission-forbidden' ? 403 : mode === 'submission-limited' ? 429
+        : mode === 'submission-error' ? 500 : 200;
+      response.writeHead(status);
       response.end('ok');
     } else {
       response.writeHead(mode === 'forbidden' ? 403 : 200, { 'content-type': 'text/html; charset=utf-8' });
@@ -102,25 +100,23 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-chat-test-');
   const context = await chromium.launchPersistentContext(temporary, { executablePath: edge, headless: true });
   const page = await context.newPage();
-  const options = { url, readyTimeoutMs: 2000, responseTimeoutMs: 2000, stableMs: 40, pollMs: 20 };
+  const options = { url, readyTimeoutMs: 2000, pollMs: 20 };
   try {
-    await t.test('clicks Send once and waits for completion before the next chat', async () => {
+    await t.test('clicks Send once and confirms acceptance before the next chat', async () => {
       sent.length = 0; mode = 'normal';
       const events: string[] = [];
       await runChat(page, [prompt, { ...prompt, id: 'second', text: 'Second question' }], {
         ...options, onEvent: (event, item) => events.push(`${event}:${item.id}`),
       });
       assert.deepEqual(sent, [prompt.text, 'Second question']);
-      assert.deepEqual(events, ['sending:test', 'completed:test', 'sending:second', 'completed:second']);
-      assert.equal(await page.locator('[data-message-author-role="assistant"]').innerText(), 'Final answer');
+      assert.deepEqual(events, ['sending:test', 'sent:test', 'sending:second', 'sent:second']);
     });
-    await t.test('current rich-text UI works without legacy ids and waits for rendered completion', async () => {
+    await t.test('current rich-text UI works without legacy ids', async () => {
       sent.length = 0; mode = 'modern';
       await runChat(page, [prompt, { ...prompt, text: 'Next modern question' }], options);
       assert.equal(sent.length, 2);
       assert.equal(sent[0]!.replace(/\s+/g, ' '), prompt.text.replace(/\s+/g, ' '));
       assert.equal(sent[1], 'Next modern question');
-      assert.equal(await page.locator('[data-content-search-unit-key$=":assistant"]').innerText(), 'Final answer');
     });
     await t.test('image and Codex prompt bodies reach the local fixture without code review wrapping', async () => {
       const prompts = generatePrompts('a', 'mixed-chat', maxPrompts).filter(item =>
@@ -178,11 +174,12 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         assert.equal(sent.length, 0);
       }
     });
-    await t.test('a new server-assigned conversation URL also acknowledges submission', async () => {
-      sent.length = 0; mode = 'url-ack';
+    await t.test('server acceptance does not depend on optimistic user bubbles or composer clearing', async () => {
+      sent.length = 0; mode = 'no-dom-ack';
       await runChat(page, [prompt], options);
       assert.deepEqual(sent, [prompt.text]);
-      assert.match(page.url(), /\/c\/11111111-1111-4111-8111-111111111111$/);
+      assert.equal(await page.getByRole('textbox').innerText(), prompt.text);
+      assert.equal(await page.locator('[data-message-author-role="user"]').count(), 0);
     });
     await t.test('replaces existing drafts with only the current prompt in every new chat', async () => {
       mode = 'draft'; sent.length = 0;
@@ -210,10 +207,40 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       await assert.rejects(runChat(page, [prompt, prompt], options), AccessBlockedError);
       assert.equal(sent.length, 1);
     });
-    await t.test('an uncertain response is never resent', async () => {
-      mode = 'no-answer'; sent.length = 0;
-      await assert.rejects(runChat(page, [prompt, prompt], { ...options, responseTimeoutMs: 150 }), /No automatic resend/);
+    await t.test('moves on without waiting for absent, unfinished, or image-only answers', async () => {
+      for (const value of ['normal', 'generating', 'image-only', 'streaming-response']) {
+        mode = value; sent.length = 0;
+        const events: string[] = [];
+        await runChat(page, [prompt, { ...prompt, id: 'next', text: 'Next question' }], {
+          ...options, onEvent: (event, item) => events.push(`${event}:${item.id}`),
+        });
+        assert.deepEqual(sent, [prompt.text, 'Next question'], value);
+        assert.deepEqual(events, ['sending:test', 'sent:test', 'sending:next', 'sent:next'], value);
+        if (value === 'generating') assert.equal(await page.getByTestId('stop-button').isVisible(), true);
+        if (value === 'image-only') assert.equal(await page.getByTestId('generated-image-preview').count(), 1);
+      }
+    });
+    await t.test('rejected submissions stop without resending or trying another prompt', async () => {
+      for (const value of ['submission-forbidden', 'submission-limited', 'submission-error']) {
+        mode = value; sent.length = 0;
+        const events: string[] = [];
+        await assert.rejects(runChat(page, [prompt, prompt], {
+          ...options, onEvent: event => events.push(event),
+        }), value === 'submission-error' ? /Submission rejected: HTTP 500/ : AccessBlockedError);
+        assert.equal(sent.length, 1, value);
+        assert.deepEqual(events, ['sending'], value);
+      }
+    });
+    await t.test('an uncertain submission is never resent or followed by another prompt', async () => {
+      mode = 'no-ack'; sent.length = 0;
+      const events: string[] = [];
+      await assert.rejects(runChat(page, [prompt, prompt], {
+        ...options, readyTimeoutMs: 350, onEvent: event => events.push(event),
+      }), /Submission acknowledgement failed.*No automatic resend/);
       assert.equal(sent.length, 1);
+      assert.equal(await page.getByRole('textbox').innerText(), '');
+      assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
+      assert.deepEqual(events, ['sending']);
     });
   } finally {
     await context.close();
