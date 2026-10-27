@@ -1,3 +1,4 @@
+import { setTimeout } from 'node:timers/promises';
 import type { Locator, Page, Response } from 'playwright';
 import type { Prompt } from './prompts/generate.js';
 
@@ -8,9 +9,11 @@ export class NonFreeAccountError extends Error {}
 export interface ChatOptions {
   url?: string;
   readyTimeoutMs?: number;
+  answerTimeoutMs?: number;
   pollMs?: number;
+  signal?: AbortSignal;
   beforeSend?: () => Promise<void>;
-  onEvent?: (event: 'sending' | 'sent', prompt: Prompt) => void;
+  onEvent?: (event: 'sending' | 'sent' | 'completed', prompt: Prompt) => void;
 }
 
 const stopName = /^(Stop generating|Stop streaming|生成を停止する|生成を停止|停止)$/i;
@@ -23,12 +26,15 @@ async function composerText(composer: Locator): Promise<string> {
       ? element.value : element instanceof HTMLElement ? element.innerText : element.textContent ?? '');
 }
 
-/** New chat for every prompt. Submit once, confirm acceptance, and never wait for an answer. */
+/** One conversation per profile. Submit each prompt once and wait for its completed answer. */
 export async function runChat(page: Page, prompts: Prompt[], options: ChatOptions = {}): Promise<void> {
   const url = options.url ?? 'https://chatgpt.com/';
   const origin = new URL(url).origin;
   const pollMs = options.pollMs ?? 500;
   const readyTimeoutMs = options.readyTimeoutMs ?? 60_000;
+  const answerTimeoutMs = options.answerTimeoutMs ?? 600_000;
+  const cancellation = options.signal ? { signal: options.signal } : {};
+  const actionOptions = { timeout: readyTimeoutMs, ...cancellation };
   let httpBlock: string | undefined;
   let nativeIdentity = false;
   let identityRevision = 0;
@@ -84,7 +90,9 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
   };
   page.on('response', onResponse);
   const stopped = page.getByTestId('stop-button').or(page.getByRole('button', { name: stopName })).first();
+  const turns = page.locator('[data-talvt-turn-state]');
   const guard = async () => {
+    options.signal?.throwIfAborted();
     if (page.isClosed()) throw new Error('Automation tab was closed. No retry will be attempted.');
     if (httpBlock) throw new AccessBlockedError(httpBlock);
     const title = await page.title();
@@ -104,21 +112,18 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
     do {
       await guard();
       if (await condition()) return;
-      await page.waitForTimeout(pollMs);
+      await setTimeout(pollMs, undefined, cancellation);
     } while (Date.now() < deadline);
     throw new Error(`${label} timed out. No automatic resend will be attempted.`);
   };
 
   try {
+    options.signal?.throwIfAborted();
+    await page.goto(url, { waitUntil: 'domcontentloaded', ...actionOptions });
+    const composer = page.getByRole('textbox', {
+      name: /ChatGPT に聞く|Ask anything|Ask ChatGPT|Message ChatGPT/i,
+    }).filter({ visible: true }).first();
     for (const prompt of prompts) {
-      identityRevision++;
-      nativeIdentity = false;
-      planRevision++;
-      accountPlan = 'unknown';
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: readyTimeoutMs });
-      const composer = page.locator('#prompt-textarea').or(page.getByRole('textbox', {
-        name: /ChatGPT に聞く|Ask anything|Ask ChatGPT|Message ChatGPT/i,
-      })).filter({ visible: true }).first();
       const readiness = { signedIn: false, freePlan: false, composerVisible: false, composerEditable: false, generating: false };
       try {
         await waitUntil(async () => {
@@ -135,7 +140,8 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
         }
         throw error;
       }
-      await composer.fill(prompt.text); // Replace any existing draft instead of appending to it.
+      const previousTurns = await turns.count();
+      await composer.fill(prompt.text, actionOptions); // Replace any existing draft instead of appending to it.
       // The rich-text editor normalizes paragraphs/blank lines during fill. Compare its
       // post-fill state, not the original plain text, to detect later manual edits.
       const filledText = await composerText(composer);
@@ -153,15 +159,14 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       options.onEvent?.('sending', prompt);
       let acknowledgement: Response;
       try {
-        // UI updates are optimistic. Wait only for the app's submission response headers,
-        // never its streaming body or the assistant's rendered answer.
+        // UI updates are optimistic. Confirm server acceptance separately from answer completion.
         [acknowledgement] = await Promise.all([
           page.waitForResponse(response => {
             const target = new URL(response.url());
             return target.origin === origin && target.pathname === '/backend-api/f/conversation' &&
               response.request().method() === 'POST';
-          }, { timeout: readyTimeoutMs }),
-          send.click({ timeout: readyTimeoutMs }), // Never retry an uncertain submission.
+          }, actionOptions),
+          send.click(actionOptions), // Never retry an uncertain submission.
         ]);
       } catch (error) {
         await guard();
@@ -172,6 +177,13 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
         throw new Error(`Submission rejected: HTTP ${acknowledgement.status()}. No automatic resend will be attempted.`);
       }
       options.onEvent?.('sent', prompt);
+      await waitUntil(async () => {
+        if (await turns.count() !== previousTurns + 1 || await stopped.isVisible()) return false;
+        const turn = turns.nth(previousTurns);
+        return await turn.getAttribute('data-talvt-turn-state') === 'complete' &&
+          await turn.locator('[data-conversation-role="assistant"]').count() > 0;
+      }, answerTimeoutMs, 'Assistant answer');
+      options.onEvent?.('completed', prompt);
     }
   } finally {
     identityRevision++;

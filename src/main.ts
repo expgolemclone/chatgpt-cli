@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
-import { chromium, type BrowserContext, type Page } from 'playwright';
+import { chromium, type BrowserContext } from 'playwright';
 import { AccessBlockedError, NonFreeAccountError, runChat } from './chat.js';
 import { generatePrompts } from './prompts/generate.js';
 
@@ -71,41 +72,59 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(record));
   };
   log('started', { seed, profiles: batches.length, logFile });
-  let lastSend = 0;
-  let failed = false;
-  for (const { profile, prompts } of batches) {
+  const stop = new AbortController();
+  const results = await Promise.allSettled(batches.map(async ({ profile, prompts }) => {
     let context: BrowserContext | undefined;
-    let lastPage: Page | undefined;
+    let lastSend = 0;
     try {
+      stop.signal.throwIfAborted();
       // A pre-opened profile will fail its own Chromium lock. Never terminate it or delete locks.
       context = await chromium.launchPersistentContext(profile.path, {
         executablePath: manifest.edgePath, headless: false, viewport: null,
         args: manifest.edgeArguments,
       });
-      const page = await context.newPage();
-      lastPage = page;
+      const page = context.pages()[0];
+      if (!page) throw new Error('Edge did not create its initial tab.');
+      const session = await context.newCDPSession(page);
+      try {
+        const { windowId } = await session.send('Browser.getWindowForTarget');
+        await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+      } finally {
+        await session.detach();
+      }
       await runChat(page, prompts, {
+        signal: stop.signal,
         beforeSend: async () => {
           const delay = Math.max(0, lastSend + 30_000 - Date.now());
-          if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-          lastSend = Date.now();
+          if (delay) await setTimeout(delay, undefined, { signal: stop.signal });
+          stop.signal.throwIfAborted();
         },
-        onEvent: (event, prompt) => log(event, { profile: profile.name, promptId: prompt.id, url: page.url() }),
+        onEvent: (event, prompt) => {
+          if (event === 'sending') lastSend = Date.now();
+          log(event, { profile: profile.name, promptId: prompt.id, url: page.url() });
+        },
       });
     } catch (error) {
-      if (error instanceof NonFreeAccountError) {
-        log('profile-skipped', { profile: profile.name, reason: 'non-free-account' });
-      } else {
-        failed = true;
-        log('profile-failed', { profile: profile.name, url: lastPage?.url(), error: String(error) });
-        if (error instanceof AccessBlockedError) {
-          log('batch-stopped', { reason: 'Access blocked; no other profiles will be contacted.' });
-          break;
-        }
+      if (error instanceof AccessBlockedError && !stop.signal.aborted) {
+        log('batch-stopped', { reason: 'Access blocked; stopping further submissions in every profile.' });
+        stop.abort(new Error('Batch stopped because another profile encountered an access block.'));
       }
+      throw error;
     } finally {
       // Only close a context successfully created by THIS run, never an existing user browser.
       await context?.close();
+    }
+  }));
+  let failed = false;
+  for (const [index, result] of results.entries()) {
+    const profile = batches[index]!.profile.name;
+    if (result.status === 'fulfilled') {
+      log('profile-completed', { profile });
+    } else if (result.reason instanceof NonFreeAccountError) {
+      log('profile-skipped', { profile, reason: 'non-free-account' });
+    } else {
+      failed = true;
+      log('profile-failed', { profile, error: String(result.reason) });
     }
   }
   log('finished', { success: !failed });

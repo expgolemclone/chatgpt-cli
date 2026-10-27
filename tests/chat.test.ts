@@ -1,70 +1,17 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 import { AccessBlockedError, NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.js';
 import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.js';
+import { accountCheck, featurePath, fixture } from './fixtures/chat.js';
 
 const edge = process.env.EDGE_EXECUTABLE ?? (process.platform === 'win32'
   ? join(process.env['ProgramFiles(x86)'] ?? 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe')
   : chromium.executablePath());
 const prompt: Prompt = { id: 'test', text: 'Review this:\n```ts\nconst n = 3;\n```' };
-const accountCheck = '/backend-api/accounts/check/v4-2023-04-27';
-const featurePath = '/backend-api/bazaar/obi/sync-token';
-
-function fixture(mode: string): string {
-  return `<!doctype html><html><head><title>Local chat fixture</title></head><body>
-  ${['login', 'conflicting-login'].includes(mode) ? '<button>ログイン</button>' : mode === 'collapsed' ? '' : mode === 'modern'
-    ? '<button aria-label="プロフィールメニューを開く">プロフィールを読み込み中</button><button aria-label="プロフィールメニューを開く"></button>'
-    : `<button data-testid="accounts-profile-button">${mode === 'plan-plus-ui-free' ? 'Free' : mode === 'plan-free-ui-plus' ? 'Plus' : 'Account'}</button>`}
-  ${mode === 'modern' ? '<div id="prompt-textarea" contenteditable="true" style="display:none"></div>' : ''}
-  <div ${mode === 'modern' ? '' : 'id="prompt-textarea"'} contenteditable="true" role="textbox" aria-label="ChatGPT に聞く">${mode === 'draft' ? 'Existing draft' : ''}</div>
-  <button aria-label="送信" disabled>Send</button>
-  <main></main>
-  <script>
-    const mode = ${JSON.stringify(mode)};
-    if (mode !== 'identity-missing') fetch('/backend-api/me');
-    if (mode !== 'plan-missing') fetch('${accountCheck}?timezone_offset_min=0');
-    if (mode === 'feature-failure') fetch('${featurePath}');
-    const composer = document.querySelector('[role="textbox"]');
-    if (mode === 'modern') composer.addEventListener('input', () => {
-      const paragraphs = composer.innerText.split('\\n').map(line => {
-        const paragraph = document.createElement('p'); paragraph.textContent = line; return paragraph;
-      });
-      composer.replaceChildren(...paragraphs);
-    });
-    const send = document.querySelector('[aria-label="送信"]');
-    composer.addEventListener('input', () => {
-      if (mode !== 'send-disabled') setTimeout(() => { send.disabled = false; }, mode === 'delayed-send' ? 150 : 0);
-    });
-    send.addEventListener('click', async () => {
-      const text = composer.innerText;
-      if (mode === 'feature-failure') await fetch('${featurePath}');
-      fetch('/backend-api/f/conversation', {method: 'POST', body: text});
-      if (mode === 'no-dom-ack') return;
-      const user = document.createElement('div');
-      if (mode === 'modern') user.dataset.userMessageBubble = 'true';
-      else user.dataset.messageAuthorRole = 'user';
-      user.textContent = text;
-      document.querySelector('main').append(user);
-      composer.textContent = '';
-      if (mode === 'generating') {
-        const stop = document.createElement('button'); stop.dataset.testid = 'stop-button';
-        document.body.append(stop); return;
-      }
-      if (mode === 'image-only') {
-        document.querySelector('main').insertAdjacentHTML('beforeend',
-          '<div data-talvt-turn-state="complete"><button data-testid="generated-image-preview"><img alt="生成画像1" src="data:image/png;base64,broken"></button></div>');
-        return;
-      }
-      if (mode === 'limit') document.body.append("You've reached the usage limit");
-    });
-  </script></body></html>`;
-}
 
 test('chat flow uses only a disposable profile and a local HTTP fixture', async t => {
   assert.ok(existsSync(edge), `Browser executable is required: ${edge}`);
@@ -72,6 +19,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   let mode = 'normal';
   let identityRequests = 0;
   let planRequests = 0;
+  let navigations = 0;
   const failures = new Map<string, number>();
   const failedRequests: string[] = [];
   const server = createServer(async (request, response) => {
@@ -131,6 +79,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       response.writeHead(status);
       response.end('ok');
     } else {
+      if (request.url === '/') navigations++;
       response.writeHead(mode === 'forbidden' ? 403 : 200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(fixture(mode));
     }
@@ -142,10 +91,11 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-chat-test-');
   const context = await chromium.launchPersistentContext(temporary, { executablePath: edge, headless: true });
   const page = await context.newPage();
-  const options = { url, readyTimeoutMs: 2000, pollMs: 20 };
+  page.on('pageerror', error => t.diagnostic(String(error)));
+  const options = { url, readyTimeoutMs: 2000, answerTimeoutMs: 2000, pollMs: 20 };
   try {
-    await t.test('sends all five default prompts once and confirms acceptance before the next chat', async () => {
-      sent.length = 0; mode = 'normal';
+    await t.test('completes five rallies in one conversation with one native identity and plan check', async () => {
+      sent.length = 0; mode = 'normal'; navigations = 0; identityRequests = 0; planRequests = 0;
       const prompts = generatePrompts('a', 'default-batch');
       assert.equal(prompts.length, 5);
       const events: string[] = [];
@@ -154,7 +104,13 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       });
       assert.deepEqual(sent.map(text => text.replace(/\s+/g, ' ')),
         prompts.map(item => item.text.replace(/\s+/g, ' ')));
-      assert.deepEqual(events, prompts.flatMap(item => [`sending:${item.id}`, `sent:${item.id}`]));
+      assert.deepEqual(events, prompts.flatMap(item => [`sending:${item.id}`, `sent:${item.id}`, `completed:${item.id}`]));
+      assert.equal(navigations, 1);
+      assert.equal(identityRequests, 1);
+      assert.equal(planRequests, 1);
+      assert.equal(await page.locator('[data-talvt-turn-state="complete"]').count(), 5);
+      assert.equal(await page.locator('[data-conversation-role="assistant"]').count(), 5);
+      assert.equal(page.url(), new URL('/c/fixture-conversation', url).href);
     });
     await t.test('current rich-text UI works without legacy ids', async () => {
       sent.length = 0; mode = 'modern';
@@ -222,7 +178,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         assert.equal(planRequests, 1, 'The runner must only observe the app request, not issue its own.');
       }
     });
-    await t.test('the free plan is revalidated for every new chat', async () => {
+    await t.test('a native plan change during the same conversation prevents another submission', async () => {
       mode = 'plan-expires'; sent.length = 0; planRequests = 0;
       await assert.rejects(runChat(page, [prompt, prompt], options), NonFreeAccountError);
       assert.deepEqual(sent, [prompt.text]);
@@ -276,7 +232,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         assert.equal(sent.length, 0, value);
       }
     });
-    await t.test('native login identity is revalidated for every new chat', async () => {
+    await t.test('native login loss during the same conversation prevents another submission', async () => {
       mode = 'identity-expires'; identityRequests = 0; sent.length = 0;
       await assert.rejects(runChat(page, [prompt, prompt], { ...options, readyTimeoutMs: 350 }), ProfileNotReadyError);
       assert.equal(sent.length, 1);
@@ -299,14 +255,17 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         assert.equal(sent.length, 0);
       }
     });
-    await t.test('server acceptance does not depend on optimistic user bubbles or composer clearing', async () => {
+    await t.test('server acceptance alone is not answer completion and never permits another submission', async () => {
       sent.length = 0; mode = 'no-dom-ack';
-      await runChat(page, [prompt], options);
+      const events: string[] = [];
+      await assert.rejects(runChat(page, [prompt, prompt], {
+        ...options, answerTimeoutMs: 250, onEvent: event => events.push(event),
+      }), /Assistant answer timed out/);
       assert.deepEqual(sent, [prompt.text]);
+      assert.deepEqual(events, ['sending', 'sent']);
       assert.equal(await page.getByRole('textbox').innerText(), prompt.text);
-      assert.equal(await page.locator('[data-message-author-role="user"]').count(), 0);
     });
-    await t.test('replaces existing drafts with only the current prompt in every new chat', async () => {
+    await t.test('replaces existing drafts without resetting the conversation', async () => {
       mode = 'draft'; sent.length = 0;
       const next = { ...prompt, id: 'next', text: 'Replacement prompt' };
       await runChat(page, [prompt, next], options);
@@ -338,8 +297,8 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
             },
           });
           assert.deepEqual(sent, [prompt.text, 'Next question']);
-          assert.deepEqual(events, ['sending:test', 'sent:test', 'sending:next', 'sent:next']);
-          assert.equal(failedRequests.filter(path => path === featurePath).length, 4);
+          assert.deepEqual(events, ['sending:test', 'sent:test', 'completed:test', 'sending:next', 'sent:next', 'completed:next']);
+          assert.equal(failedRequests.filter(path => path === featurePath).length, 3);
           assert.equal(failedRequests.filter(path => path === '/backend-api/optional-feature').length, 2);
         }
       } finally {
@@ -387,18 +346,56 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       await assert.rejects(runChat(page, [prompt, prompt], options), AccessBlockedError);
       assert.equal(sent.length, 1);
     });
-    await t.test('moves on without waiting for absent, unfinished, or image-only answers', async () => {
-      for (const value of ['normal', 'generating', 'image-only', 'streaming-response']) {
+    await t.test('waits for text and image-only answers, including the last answer', async () => {
+      for (const value of ['normal', 'delayed-answer', 'image-only']) {
         mode = value; sent.length = 0;
         const events: string[] = [];
         await runChat(page, [prompt, { ...prompt, id: 'next', text: 'Next question' }], {
           ...options, onEvent: (event, item) => events.push(`${event}:${item.id}`),
         });
         assert.deepEqual(sent, [prompt.text, 'Next question'], value);
-        assert.deepEqual(events, ['sending:test', 'sent:test', 'sending:next', 'sent:next'], value);
-        if (value === 'generating') assert.equal(await page.getByTestId('stop-button').isVisible(), true);
-        if (value === 'image-only') assert.equal(await page.getByTestId('generated-image-preview').count(), 1);
+        assert.deepEqual(events, ['sending:test', 'sent:test', 'completed:test', 'sending:next', 'sent:next', 'completed:next'], value);
+        assert.equal(await page.locator('[data-talvt-turn-state="complete"]').count(), 2);
+        assert.equal(await page.getByTestId('stop-button').count(), 0);
+        if (value === 'image-only') assert.equal(await page.getByTestId('generated-image-preview').count(), 2);
       }
+    });
+    await t.test('missing or unfinished answers never trigger another prompt even when Stop is absent', async () => {
+      for (const value of ['no-answer', 'generating', 'partial-answer', 'complete-while-stopping', 'streaming-response']) {
+        mode = value; sent.length = 0;
+        const events: string[] = [];
+        await assert.rejects(runChat(page, [prompt, prompt], {
+          ...options, answerTimeoutMs: 300, onEvent: event => events.push(event),
+        }), /Assistant answer timed out/);
+        assert.deepEqual(sent, [prompt.text], value);
+        assert.deepEqual(events, ['sending', 'sent'], value);
+      }
+    });
+    await t.test('an old completed turn cannot satisfy the new answer wait', async () => {
+      mode = 'no-answer'; sent.length = 0;
+      await assert.rejects(runChat(page, [prompt, prompt], {
+        ...options, answerTimeoutMs: 250, beforeSend: async () => {
+          await page.locator('main').evaluate(element => {
+            element.insertAdjacentHTML('afterbegin', '<div data-talvt-turn-state="complete"><h4 data-conversation-role="assistant">Old answer</h4></div>');
+          });
+        },
+      }), /Assistant answer timed out/);
+      assert.deepEqual(sent, [prompt.text]);
+    });
+    await t.test('batch cancellation interrupts answer waiting without another submission', async () => {
+      mode = 'generating'; sent.length = 0;
+      const controller = new AbortController();
+      await assert.rejects(runChat(page, [prompt, prompt], {
+        ...options, signal: controller.signal, onEvent: event => {
+          if (event === 'sent') controller.abort(new Error('Test batch stopped'));
+        },
+      }), /Test batch stopped/);
+      assert.deepEqual(sent, [prompt.text]);
+      const cancelled = new AbortController();
+      cancelled.abort();
+      sent.length = 0;
+      await assert.rejects(runChat(page, [prompt], { ...options, signal: cancelled.signal }), /aborted/i);
+      assert.deepEqual(sent, []);
     });
     await t.test('rejected submissions stop without resending or trying another prompt', async () => {
       for (const value of ['submission-forbidden', 'submission-limited', 'submission-error']) {
@@ -419,7 +416,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       }), /Submission acknowledgement failed.*No automatic resend/);
       assert.equal(sent.length, 1);
       assert.equal(await page.getByRole('textbox').innerText(), '');
-      assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
+      assert.equal(await page.locator('[data-user-message-bubble]').count(), 1);
       assert.deepEqual(events, ['sending']);
     });
   } finally {
@@ -430,81 +427,3 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   }
 });
 
-test('the CLI skips paid profiles, tolerates feature failures, and stops the batch on chat access blocks', () => {
-  const temporary = mkdtempSync('C:/dev/tmp/gpt-message-cli-test-');
-  try {
-    const preload = join(temporary, 'fixture.mjs');
-    writeFileSync(preload, `
-      import { basename } from 'node:path';
-      import { chromium } from ${JSON.stringify(import.meta.resolve('playwright'))};
-      const launch = chromium.launchPersistentContext.bind(chromium);
-      chromium.launchPersistentContext = async (directory, options) => {
-        const name = basename(directory);
-        const context = await launch(directory, { ...options, headless: true });
-        await context.route('**/*', async route => {
-          const target = new URL(route.request().url());
-          if (target.origin !== 'https://chatgpt.com') return route.abort();
-          if (target.pathname === '/backend-api/me') {
-            return route.fulfill({ json: { email: 'fixture@example.test' } });
-          }
-          if (target.pathname.startsWith('/backend-api/accounts/check/')) {
-            return route.fulfill({ json: { accounts: { default: { account: { plan_type: name === 'paid' ? 'plus' : 'free' } } } } });
-          }
-          if (target.pathname === ${JSON.stringify(featurePath)}) {
-            return route.fulfill({ status: name === 'feature-limited' ? 429 : 403, json: {} });
-          }
-          if (target.pathname === '/backend-api/f/conversation') {
-            console.log(JSON.stringify({ event: 'fixture-submitted', profile: name }));
-            return route.fulfill({ status: name === 'submission-blocked' ? 403 : name === 'submission-limited' ? 429 : 200, body: 'ok' });
-          }
-          if (route.request().isNavigationRequest()) {
-            return route.fulfill({ status: name === 'blocked' ? 403 : 200,
-              contentType: 'text/html; charset=utf-8', body: ${JSON.stringify(fixture('feature-failure'))} });
-          }
-          return route.abort();
-        });
-        console.log(JSON.stringify({ event: 'fixture-profile-opened', profile: name }));
-        return context;
-      };
-    `);
-    const cli = fileURLToPath(new URL('../src/main.js', import.meta.url));
-    const scenarios = [
-      { names: ['paid', 'free'], status: 0, submitted: ['free'], skipped: ['paid'], opened: ['paid', 'free'] },
-      { names: ['paid'], status: 0, submitted: [], skipped: ['paid'], opened: ['paid'] },
-      { names: ['feature-limited'], status: 0, submitted: ['feature-limited'], skipped: [], opened: ['feature-limited'] },
-      { names: ['blocked', 'free'], status: 1, submitted: [], skipped: [], opened: ['blocked'] },
-      { names: ['submission-blocked', 'free'], status: 1, submitted: ['submission-blocked'], skipped: [], opened: ['submission-blocked'] },
-      { names: ['submission-limited', 'free'], status: 1, submitted: ['submission-limited'], skipped: [], opened: ['submission-limited'] },
-    ];
-    for (const [index, scenario] of scenarios.entries()) {
-      const root = join(temporary, String(index), 'profiles');
-      const profiles = scenario.names.map((name, id) => {
-        const path = join(root, name);
-        mkdirSync(path, { recursive: true });
-        return { id: id.toString(16).padStart(32, '0'), name, path };
-      });
-      const manifest = join(temporary, `manifest-${index}.json`);
-      writeFileSync(manifest, JSON.stringify({
-        schemaVersion: 1, edgePath: edge, edgeArguments: ['--no-first-run', '--disable-background-networking'],
-        profileRoot: root, profiles,
-      }));
-      const localAppData = join(temporary, String(index), 'localappdata');
-      const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, '--manifest', manifest,
-        '--questions', '1', '--seed', 'fixture'], {
-        encoding: 'utf8', timeout: 30_000, env: { ...process.env, LOCALAPPDATA: localAppData },
-      });
-      assert.equal(result.error, undefined);
-      assert.equal(result.status, scenario.status, result.stdout + result.stderr);
-      const records = result.stdout.trim().split('\n').map(line => JSON.parse(line));
-      const profilesFor = (event: string) => records.filter(record => record.event === event).map(record => record.profile);
-      assert.deepEqual(profilesFor('fixture-submitted'), scenario.submitted);
-      assert.deepEqual(profilesFor('fixture-profile-opened'), scenario.opened);
-      assert.deepEqual(profilesFor('profile-skipped'), scenario.skipped);
-      assert.equal(records.at(-1).event, 'finished');
-      assert.equal(records.at(-1).success, scenario.status === 0);
-      assert.deepEqual(readdirSync(join(localAppData, 'gpt-send-messages')), ['logs']);
-    }
-  } finally {
-    rmSync(temporary, { recursive: true, force: true });
-  }
-});
