@@ -4,10 +4,9 @@ import { join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
-import type { BrowserContext } from 'playwright';
 import { NonFreeAccountError, runChat } from './chat.ts';
 import { AccessBlockedError } from './browser/account.ts';
-import { launchProfile } from './browser/edge.ts';
+import { launchProfile, openProfile } from './browser/edge.ts';
 import { inspectProfile } from './browser/inspect.ts';
 import { assertProfileDirectory, createProfile, listProfiles, resolveProfiles } from './browser/profiles.ts';
 import { generatePrompts } from './prompts/generate.ts';
@@ -17,6 +16,7 @@ const help = `Usage: node src/main.ts <login|open|profiles|inspect|send> [option
   login              Open one dedicated Edge profile for manual ChatGPT login.
                      With --profile-root, create exactly one fresh marked profile.
   open               Open existing profiles at ChatGPT Usage without checking login.
+  login/open use ordinary installed Edge directly, without Playwright or debugging.
   profiles           List owned direct profiles as JSON. Requires --profile-root.
   inspect            Confirm email and personal plan as JSON. Requires one --profile.
                      Never sends prompts or renames profiles.
@@ -95,24 +95,24 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(record));
   };
   log('started', { command, seed, profiles: batches.length, logFile });
+  if (login || command === 'open') {
+    for (const { profile } of batches) {
+      await openProfile(profile, login ? 'https://chatgpt.com/' : 'https://chatgpt.com/#settings/Usage');
+      log('profile-opened', { profile: profile.name });
+    }
+    log('finished', { success: true });
+    return;
+  }
   const stop = new AbortController();
   const results = await Promise.allSettled(batches.map(async ({ profile, prompts }) => {
-    let context: BrowserContext | undefined;
+    let edge: Awaited<ReturnType<typeof launchProfile>> | undefined;
     let lastSend = 0;
     try {
       stop.signal.throwIfAborted();
-      context = await launchProfile(profile);
-      const page = context.pages()[0];
+      edge = await launchProfile(profile);
+      const page = edge.context.pages()[0];
       if (!page) throw new Error('Edge did not create its initial tab.');
-      if (login || command === 'open') {
-        await page.goto(login ? 'https://chatgpt.com/' : 'https://chatgpt.com/#settings/Usage',
-          { waitUntil: 'domcontentloaded' });
-        if (login) console.error('Sign in to ChatGPT in this dedicated Edge window, then close it. Never paste credentials into the terminal.');
-        await new Promise<void>(resolve => context!.once('close', () => resolve()));
-        log(login ? 'login-window-closed' : 'usage-window-closed', { profile: profile.name });
-        return;
-      }
-      const session = await context.newCDPSession(page);
+      const session = await edge.context.newCDPSession(page);
       try {
         const { windowId } = await session.send('Browser.getWindowForTarget');
         await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
@@ -138,7 +138,7 @@ async function main(): Promise<void> {
       }
       throw error;
     } finally {
-      await context?.close();
+      await edge?.close();
     }
   }));
   let failed = false;

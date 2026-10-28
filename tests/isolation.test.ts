@@ -20,7 +20,7 @@ test('factory OEM bookmarks are allowed but nested imported bookmarks are reject
   }
 });
 
-test('standard persistent Edge contexts isolate and retain cookies localStorage IndexedDB and caches', async () => {
+test('ordinary Edge over CDP isolates and retains cookies localStorage IndexedDB and caches', async () => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-edge-isolation-');
   const server = createServer((_request, response) => {
     response.setHeader('content-type', 'text/html');
@@ -36,10 +36,14 @@ test('standard persistent Edge contexts isolate and retain cookies localStorage 
     for (const [profile, expected, value] of [
       [first, null, 'original'], [fresh, null, 'fresh'], [first, 'original', null], [fresh, 'fresh', null],
     ] as const) {
-      const context = await launchProfile(profile);
+      const edge = await launchProfile(profile);
+      const { context } = edge;
       try {
         const page = context.pages()[0]!;
         await page.goto(origin);
+        const session = await context.newCDPSession(page);
+        await assert.rejects(session.send('Browser.getBrowserCommandLine'), /--enable-automation.*not set/);
+        await session.detach();
         assert.deepEqual((await context.cookies(origin)).filter(cookie => cookie.name === 'identity').map(cookie => cookie.value),
           expected === null ? [] : [expected]);
         assert.deepEqual(await page.evaluate(async () => ({
@@ -68,7 +72,7 @@ test('standard persistent Edge contexts isolate and retain cookies localStorage 
             });
           }, value);
         }
-      } finally { await context.close(); }
+      } finally { await edge.close(); }
     }
     const preferences = JSON.parse(readFileSync(join(fresh.path, 'Default/Preferences'), 'utf8'));
     assert.equal(Boolean(preferences.account_info?.length), false);

@@ -1,21 +1,16 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { join } from 'node:path';
 import { test } from 'node:test';
-import { chromium } from 'playwright';
+import { launchProfile } from '../src/browser/edge.ts';
 import { NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
 import { AccessBlockedError } from '../src/browser/account.ts';
 import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.ts';
 import { accountCheck, featurePath, fixture } from './fixtures/chat.ts';
 
-const edge = process.env.EDGE_EXECUTABLE ?? (process.platform === 'win32'
-  ? join(process.env['ProgramFiles(x86)'] ?? 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe')
-  : chromium.executablePath());
 const prompt: Prompt = { id: 'test', text: 'Review this:\n```ts\nconst n = 3;\n```' };
 
 test('chat flow uses only a disposable profile and a local HTTP fixture', async t => {
-  assert.ok(existsSync(edge), `Browser executable is required: ${edge}`);
   const sent: string[] = [];
   let mode = 'normal';
   let identityRequests = 0;
@@ -90,7 +85,8 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   assert.ok(address && typeof address !== 'string');
   const url = `http://127.0.0.1:${address.port}/`;
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-chat-test-');
-  const context = await chromium.launchPersistentContext(temporary, { executablePath: edge, headless: true });
+  const edge = await launchProfile({ path: temporary, name: 'fixture' });
+  const { context } = edge;
   const page = await context.newPage();
   page.on('pageerror', error => t.diagnostic(String(error)));
   const options = { url, readyTimeoutMs: 2000, answerTimeoutMs: 2000, pollMs: 20 };
@@ -421,7 +417,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       assert.deepEqual(events, ['sending']);
     });
   } finally {
-    await context.close();
+    await edge.close();
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     rmSync(temporary, { recursive: true, force: true });

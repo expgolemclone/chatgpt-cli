@@ -67,12 +67,12 @@ export function claimAccess(path: string, now = Date.now()): void {
 /** Inspect one profile without submitting messages or issuing private API requests. */
 export async function inspectProfile(profile: Profile, options: { url?: string; readyTimeoutMs?: number } = {}): Promise<Inspection> {
   let stage = 'browser_launch';
-  let context: Awaited<ReturnType<typeof launchProfile>> | undefined;
+  let edge: Awaited<ReturnType<typeof launchProfile>> | undefined;
   let observation: ReturnType<typeof observeAccount> | undefined;
   try {
     claimAccess(profile.path);
-    context = await launchProfile(profile);
-    const page = context.pages()[0];
+    edge = await launchProfile(profile);
+    const page = edge.context.pages()[0];
     if (!page) throw new InspectionError('initial_tab_missing');
     page.setDefaultTimeout(5000);
     const url = options.url ?? 'https://chatgpt.com/#settings/Account';
@@ -104,6 +104,6 @@ export async function inspectProfile(profile: Profile, options: { url?: string; 
     return result('unknown', `${stage}:${reason}`);
   } finally {
     observation?.dispose();
-    await context?.close();
+    await edge?.close();
   }
 }

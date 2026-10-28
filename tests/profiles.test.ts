@@ -12,20 +12,25 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
     const preload = join(temporary, 'fixture.mjs');
     writeFileSync(preload, `
       import assert from 'node:assert/strict';
-      import { basename } from 'node:path';
+      import { basename, join } from 'node:path';
+      import { existsSync, readFileSync } from 'node:fs';
       import { setTimeout } from 'node:timers/promises';
       import { chromium } from ${JSON.stringify(import.meta.resolve('playwright'))};
-      const launch = chromium.launchPersistentContext.bind(chromium);
+      const connect = chromium.connectOverCDP.bind(chromium);
       let opened = 0;
       let release;
       const allOpened = new Promise(resolve => { release = resolve; });
-      chromium.launchPersistentContext = async (directory, options) => {
+      chromium.connectOverCDP = async (endpoint, options) => {
+        const port = new URL(endpoint).port;
+        const directory = process.argv.filter((value,index) => process.argv[index-1] === '--profile')
+          .find(path => existsSync(join(path,'DevToolsActivePort')) &&
+            readFileSync(join(path,'DevToolsActivePort'),'utf8').split(/\\r?\\n/)[0] === port);
+        assert.ok(directory, 'CDP must attach only to an explicitly selected profile.');
         const name = basename(directory);
-        assert.equal(options.channel, 'msedge');
-        assert.equal(options.headless, false);
-        assert.ok(options.args.includes('--disable-sync'));
-        const context = await launch(directory, { ...options, args: [...options.args, '--disable-background-networking'] });
+        const browser = await connect(endpoint, options);
+        const context = browser.contexts()[0];
         const session = await context.newCDPSession(context.pages()[0]);
+        await assert.rejects(session.send('Browser.getBrowserCommandLine'), /--enable-automation.*not set/);
         await context.route('**/*', async route => {
           const target = new URL(route.request().url());
           if (target.origin !== 'https://chatgpt.com') return route.abort();
@@ -63,7 +68,7 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
         context.on('close', () => console.log(JSON.stringify({ event: 'fixture-profile-closed', profile: name })));
         console.log(JSON.stringify({ event: 'fixture-profile-opened', profile: name }));
         if (++opened === Number(process.env.FIXTURE_PROFILE_COUNT)) release();
-        return context;
+        return browser;
       };
     `);
     const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
