@@ -1,8 +1,7 @@
 import { setTimeout } from 'node:timers/promises';
 import type { Locator, Page, Response } from 'playwright';
 import type { Prompt } from './prompts/generate.ts';
-
-export class AccessBlockedError extends Error {}
+import { assertAccess, loginName, observeAccount } from './browser/account.ts';
 export class ProfileNotReadyError extends Error {}
 export class NonFreeAccountError extends Error {}
 
@@ -17,8 +16,6 @@ export interface ChatOptions {
 }
 
 const stopName = /^(Stop generating|Stop streaming|生成を停止する|生成を停止|停止)$/i;
-const loginName = /^(Log in|Sign in|ログイン)$/i;
-const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ|verify you are human|人間であることを確認/i;
 
 async function composerText(composer: Locator): Promise<string> {
   return composer.evaluate(element =>
@@ -35,73 +32,14 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
   const answerTimeoutMs = options.answerTimeoutMs ?? 600_000;
   const cancellation = options.signal ? { signal: options.signal } : {};
   const actionOptions = { timeout: readyTimeoutMs, ...cancellation };
-  let httpBlock: string | undefined;
-  let nativeIdentity = false;
-  let identityRevision = 0;
-  let accountPlan: 'unknown' | 'free' | 'non-free' = 'unknown';
-  let planRevision = 0;
-  const hasFreePlan = () => accountPlan === 'free';
-  const onResponse = (response: Response) => {
-    const target = new URL(response.url());
-    const request = response.request();
-    const mainDocument = request.isNavigationRequest() && response.frame() === page.mainFrame();
-    if (target.origin !== origin) return;
-    const identityRequest = target.pathname === '/backend-api/me';
-    const planRequest = target.pathname.startsWith('/backend-api/accounts/check/');
-    const chatRequest = /^\/backend-api\/(?:f\/conversation|sentinel)(?:\/|$)/.test(target.pathname);
-    // Feature-specific failures do not establish a chat-wide access block.
-    if ((mainDocument || identityRequest || planRequest || chatRequest) &&
-        (response.status() === 403 || response.status() === 429)) {
-      httpBlock = `HTTP ${response.status()} ${target.pathname}`;
-    }
-    if (identityRequest) {
-      nativeIdentity = false;
-      const observedRevision = ++identityRevision;
-      // Observe only the app's normal request. Never request credentials or log its body.
-      if (response.status() === 200) {
-        void response.json().then((value: unknown) => {
-          if (identityRevision !== observedRevision) return;
-          nativeIdentity = value !== null && typeof value === 'object' &&
-            'email' in value && typeof value.email === 'string' && /^[^@\s]+@[^@\s]+$/.test(value.email);
-        }).catch(() => {}); // Missing/invalid identity remains unconfirmed and cannot send.
-      }
-    }
-    if (planRequest) {
-      accountPlan = 'unknown';
-      const observedRevision = ++planRevision;
-      if (response.status() === 200) {
-        void response.json().then((value: unknown) => {
-          if (planRevision !== observedRevision || value === null || typeof value !== 'object' ||
-              !('accounts' in value) || value.accounts === null || typeof value.accounts !== 'object' ||
-              Array.isArray(value.accounts)) return;
-          const plans = Object.values(value.accounts).map((entry: unknown) =>
-            entry !== null && typeof entry === 'object' && 'account' in entry &&
-            entry.account !== null && typeof entry.account === 'object' && 'plan_type' in entry.account
-              ? entry.account.plan_type : undefined);
-          // Require positive free evidence for every available account/workspace.
-          if (plans.some(plan => typeof plan === 'string' && plan.length > 0 && plan !== 'free')) {
-            accountPlan = 'non-free';
-          } else if (plans.length > 0 && plans.every(plan => plan === 'free')) {
-            accountPlan = 'free';
-          }
-        }).catch(() => {});
-      }
-    }
-  };
-  page.on('response', onResponse);
+  const { account, dispose } = observeAccount(page, origin);
+  const hasFreePlan = () => account.plan?.sending === 'free';
   const stopped = page.getByTestId('stop-button').or(page.getByRole('button', { name: stopName })).first();
   const turns = page.locator('[data-talvt-turn-state]');
   const guard = async () => {
     options.signal?.throwIfAborted();
-    if (page.isClosed()) throw new Error('Automation tab was closed. No retry will be attempted.');
-    if (httpBlock) throw new AccessBlockedError(httpBlock);
-    const title = await page.title();
-    const text = await page.locator('body').innerText();
-    if (/just a moment|attention required/i.test(title) || blockedText.test(text) ||
-        await page.locator('iframe[src*="challenges.cloudflare.com"]').first().isVisible()) {
-      throw new AccessBlockedError('Challenge or usage limit detected. Stopping the batch.');
-    }
-    if (accountPlan === 'non-free') throw new NonFreeAccountError('Non-free account detected; this profile will be skipped.');
+    await assertAccess(page, account);
+    if (account.plan?.sending === 'non-free') throw new NonFreeAccountError('Non-free account detected; this profile will be skipped.');
     if (await page.getByRole('button', { name: loginName }).or(
       page.getByRole('link', { name: loginName })).first().isVisible()) {
       throw new ProfileNotReadyError('Login required; manual login is needed.');
@@ -127,7 +65,7 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       const readiness = { signedIn: false, freePlan: false, composerVisible: false, composerEditable: false, generating: false };
       try {
         await waitUntil(async () => {
-          readiness.signedIn = nativeIdentity;
+          readiness.signedIn = Boolean(account.identity?.email);
           readiness.freePlan = hasFreePlan();
           readiness.composerVisible = await composer.isVisible();
           readiness.composerEditable = readiness.composerVisible && await composer.isEditable();
@@ -154,7 +92,7 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       if ((await composerText(composer)).replaceAll('\r\n', '\n') !== filledText.replaceAll('\r\n', '\n')) {
         throw new ProfileNotReadyError('Composer changed before sending; no message will be sent.');
       }
-      if (!nativeIdentity) throw new ProfileNotReadyError('Native login identity is no longer confirmed; no message will be sent.');
+      if (!account.identity?.email) throw new ProfileNotReadyError('Native login identity is no longer confirmed; no message will be sent.');
       if (!hasFreePlan()) throw new ProfileNotReadyError('Free account plan is no longer confirmed; no message will be sent.');
       options.onEvent?.('sending', prompt);
       let acknowledgement: Response;
@@ -186,8 +124,6 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       options.onEvent?.('completed', prompt);
     }
   } finally {
-    identityRevision++;
-    planRevision++;
-    page.off('response', onResponse);
+    dispose();
   }
 }

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { assertProfileDirectory, resolveProfiles } from '../src/profiles.ts';
+import { assertProfileDirectory, resolveProfiles } from '../src/browser/profiles.ts';
 import { generatePrompts, maxPrompts } from '../src/prompts/generate.ts';
 
 const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
@@ -23,7 +23,7 @@ test('standalone CLI resolves its own dedicated profiles without another project
         const result = run(...args);
         assert.equal(result.error, undefined);
         assert.equal(result.status, 0, result.stdout + result.stderr);
-        assert.match(result.stdout, /<login\|send>/);
+        assert.match(result.stdout, /<login\|open\|profiles\|inspect\|send>/);
         assert.match(result.stdout, /No PowerShell 7 or other project/);
         assert.equal(existsSync(localAppData), false);
       }

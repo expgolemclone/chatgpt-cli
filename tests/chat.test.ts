@@ -4,7 +4,8 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { chromium } from 'playwright';
-import { AccessBlockedError, NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
+import { NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
+import { AccessBlockedError } from '../src/browser/account.ts';
 import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.ts';
 import { accountCheck, featurePath, fixture } from './fixtures/chat.ts';
 

@@ -5,21 +5,30 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 import type { BrowserContext } from 'playwright';
-import { AccessBlockedError, NonFreeAccountError, runChat } from './chat.ts';
-import { assertProfileDirectory, resolveProfiles } from './profiles.ts';
+import { NonFreeAccountError, runChat } from './chat.ts';
+import { AccessBlockedError } from './browser/account.ts';
+import { launchProfile } from './browser/edge.ts';
+import { inspectProfile } from './browser/inspect.ts';
+import { assertProfileDirectory, createProfile, listProfiles, resolveProfiles } from './browser/profiles.ts';
 import { generatePrompts } from './prompts/generate.ts';
 
-const help = `Usage: node src/main.ts <login|send> [options]
+const help = `Usage: node src/main.ts <login|open|profiles|inspect|send> [options]
 
-  login              Open a dedicated Edge profile for manual ChatGPT login.
-                     Close that Edge window when finished. No prompts are sent.
+  login              Open one dedicated Edge profile for manual ChatGPT login.
+                     With --profile-root, create exactly one fresh marked profile.
+  open               Open existing profiles at ChatGPT Usage without checking login.
+  profiles           List owned direct profiles as JSON. Requires --profile-root.
+  inspect            Confirm email and personal plan as JSON. Requires one --profile.
+                     Never sends prompts or renames profiles.
   send               Send locally generated prompts to signed-in free accounts.
 
-  --profile PATH     Absolute dedicated user-data directory. Repeat for send.
+  --profile PATH     Absolute dedicated user-data directory. Repeat for open/send.
                      Default: %LOCALAPPDATA%/gpt-send-messages/profile
-  --questions N      Prompts per profile (default: 5).
-  --seed TEXT        Reproducible prompt selection.
-  --dry-run          Preview prompts without opening Edge or writing files.
+  --profile-root PATH  Explicit collection of marked profiles, excluding archive.
+                       Cannot be combined with --profile.
+  --questions N      Prompts per profile (default: 5). Send only.
+  --seed TEXT        Reproducible prompt selection. Send only.
+  --dry-run          Preview prompts without opening Edge or writing files. Send only.
   --help             Show this help.
 
 Requires Windows, Node.js, and Microsoft Edge. No PowerShell 7 or other project
@@ -31,37 +40,53 @@ This tool does not create accounts or upgrade their plans.
 
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    profile: { type: 'string', multiple: true }, questions: { type: 'string' },
-    seed: { type: 'string' }, 'dry-run': { type: 'boolean', default: false },
-    help: { type: 'boolean', default: false },
+    profile: { type: 'string', multiple: true }, 'profile-root': { type: 'string' },
+    questions: { type: 'string' }, seed: { type: 'string' },
+    'dry-run': { type: 'boolean', default: false }, help: { type: 'boolean', default: false },
   } });
   if (values.help || positionals.length === 0) { console.log(help); return; }
   const command = positionals[0];
-  if (positionals.length !== 1 || (command !== 'login' && command !== 'send')) {
-    throw new Error('Choose login or send. Use --help for usage.');
+  if (positionals.length !== 1 || !['login', 'open', 'profiles', 'inspect', 'send'].includes(command!)) {
+    throw new Error('Choose login, open, profiles, inspect, or send. Use --help for usage.');
   }
   if (process.platform !== 'win32') throw new Error('This command requires Windows and Microsoft Edge.');
-  const profiles = resolveProfiles(values.profile ?? []);
   const login = command === 'login';
-  if (login && (profiles.length !== 1 || values.questions !== undefined || values.seed !== undefined || values['dry-run'])) {
-    throw new Error('login accepts only one --profile directory; send options are not allowed.');
+  if (command !== 'send' && (values.questions !== undefined || values.seed !== undefined || values['dry-run'])) {
+    throw new Error('Send options are not allowed for this command.');
   }
+  const root = values['profile-root'];
+  if (root !== undefined && values.profile !== undefined) throw new Error('Choose --profile-root or --profile, not both.');
+  if (command === 'profiles' && root === undefined) throw new Error('profiles requires --profile-root.');
+  if (command === 'inspect' && (root !== undefined || values.profile?.length !== 1)) {
+    throw new Error('inspect requires exactly one --profile.');
+  }
+  const profiles = root === undefined ? resolveProfiles(values.profile ?? []) : listProfiles(root);
+  if (login && root === undefined && profiles.length !== 1) throw new Error('login accepts only one --profile directory.');
+  if (command === 'profiles') {
+    console.log(JSON.stringify({ root: resolve(root!), profiles }));
+    return;
+  }
+  if (command === 'inspect') {
+    console.log(JSON.stringify({ profile: profiles[0], ...await inspectProfile(profiles[0]!) }));
+    return;
+  }
+  if (command === 'send' && profiles.length === 0) throw new Error('No owned profiles in this collection. Run login first.');
   const count = values.questions === undefined ? undefined : Number(values.questions);
   const seed = values.seed ?? randomUUID();
   const batches = profiles.map(profile => ({
-    profile, prompts: login ? [] : generatePrompts(profile.path.toLowerCase(), seed, count),
+    profile, prompts: command === 'send' ? generatePrompts(profile.path.toLowerCase(), seed, count) : [],
   }));
   if (values['dry-run']) {
-    console.log(JSON.stringify({ seed, profiles: batches.map(({ profile, prompts }) => ({
-      name: profile.name, prompts,
-    })) }, null, 2));
+    console.log(JSON.stringify({ seed, profiles: batches.map(({ profile, prompts }) => ({ name: profile.name, prompts })) }, null, 2));
     return;
   }
-  for (const profile of profiles) assertProfileDirectory(profile.path, !login);
-  const { chromium } = await import('playwright');
-  if (login) mkdirSync(profiles[0]!.path, { recursive: true });
-  const localAppData = process.env.LOCALAPPDATA!; // Validated by resolveProfiles.
-  const logs = join(localAppData, 'gpt-send-messages', 'logs');
+  if (login && root !== undefined) {
+    batches.splice(0, batches.length, { profile: createProfile(root), prompts: [] });
+  } else {
+    for (const profile of profiles) assertProfileDirectory(profile.path, !login);
+    if (login) mkdirSync(profiles[0]!.path, { recursive: true });
+  }
+  const logs = join(process.env.LOCALAPPDATA!, 'gpt-send-messages', 'logs');
   mkdirSync(logs, { recursive: true });
   const logFile = join(logs, `${new Date().toISOString().replaceAll(':', '-')}-${randomUUID()}.jsonl`);
   const log = (event: string, details: Record<string, unknown> = {}) => {
@@ -76,20 +101,15 @@ async function main(): Promise<void> {
     let lastSend = 0;
     try {
       stop.signal.throwIfAborted();
-      assertProfileDirectory(profile.path, true);
-      // Chromium owns the profile lock. Never terminate another browser or remove its locks.
-      context = await chromium.launchPersistentContext(profile.path, {
-        channel: 'msedge', headless: false, viewport: null,
-        args: ['--no-first-run', '--no-default-browser-check', '--disable-sync',
-          '--disable-features=msImplicitSignin,msEnableWebToBrowserSignIn,msEnableAADWebToBrowserSignIn,msSeamlessWebToBrowserSignIn,msEdgeOnRampImport,msEdgeFRESpartanImportAllowed,msEdgeContinuousMigrationUser'],
-      });
+      context = await launchProfile(profile);
       const page = context.pages()[0];
       if (!page) throw new Error('Edge did not create its initial tab.');
-      if (login) {
-        await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' });
-        console.error('Sign in to ChatGPT in this dedicated Edge window, then close it. Never paste credentials into the terminal.');
+      if (login || command === 'open') {
+        await page.goto(login ? 'https://chatgpt.com/' : 'https://chatgpt.com/#settings/Usage',
+          { waitUntil: 'domcontentloaded' });
+        if (login) console.error('Sign in to ChatGPT in this dedicated Edge window, then close it. Never paste credentials into the terminal.');
         await new Promise<void>(resolve => context!.once('close', () => resolve()));
-        log('login-window-closed', { profile: profile.name });
+        log(login ? 'login-window-closed' : 'usage-window-closed', { profile: profile.name });
         return;
       }
       const session = await context.newCDPSession(page);
@@ -118,7 +138,6 @@ async function main(): Promise<void> {
       }
       throw error;
     } finally {
-      // Close only a context successfully created by this run.
       await context?.close();
     }
   }));

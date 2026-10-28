@@ -78,6 +78,14 @@ test('a busy profile fails without terminating or unlocking its existing browser
     assert.equal(records.some(record => record.event === 'sending'), false);
     assert.equal(records.at(-1).success, false);
     assert.equal(await page.title(), 'Keep existing browser');
+    const inspected = spawnSync(process.execPath, [cli, 'inspect', '--profile', profilePath], {
+      encoding: 'utf8', timeout: 25_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
+    });
+    assert.equal(inspected.status, 0, inspected.stdout + inspected.stderr);
+    const inspection = JSON.parse(inspected.stdout);
+    assert.equal(inspection.status, 'unknown');
+    assert.match(inspection.reason, /^browser_launch:/);
+    assert.equal(await page.title(), 'Keep existing browser', 'Inspection must not close or unlock the external browser.');
   } finally {
     await context.close();
     rmSync(temporary, { recursive: true, force: true });
