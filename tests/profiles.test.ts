@@ -131,7 +131,7 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
         }
         assert.equal(records.at(-1).event, 'finished');
         assert.equal(records.at(-1).success, scenario.status === 0);
-        assert.deepEqual(readdirSync(join(localAppData, 'gpt-send-messages')), ['logs']);
+        assert.deepEqual(readdirSync(join(localAppData, 'chatgpt-cli')), ['logs']);
         assert.equal(existsSync(join(localAppData, 'gpt-usage')), false);
       });
     }

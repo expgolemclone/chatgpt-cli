@@ -4,7 +4,8 @@ import { isAbsolute, join } from 'node:path';
 import { unlinkSync } from 'node:fs';
 import { setTimeout } from 'node:timers/promises';
 import type { Browser, BrowserContext } from 'playwright';
-import { assertProfileDirectory, readProfileId, readRegularFile, type Profile } from './profiles.ts';
+import { assertProfileDirectory, readProfileId, type Profile } from './profiles.ts';
+import { readRegularFile } from '../storage/files.ts';
 
 const edgeArguments = ['--no-first-run', '--no-default-browser-check', '--disable-sync',
   '--disable-features=msImplicitSignin,msEnableWebToBrowserSignIn,msEnableAADWebToBrowserSignIn,msSeamlessWebToBrowserSignIn,msEdgeOnRampImport,msEdgeFRESpartanImportAllowed,msEdgeContinuousMigrationUser'];

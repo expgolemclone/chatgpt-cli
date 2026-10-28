@@ -2,7 +2,7 @@ import type { Page, Response } from 'playwright';
 
 export class AccessBlockedError extends Error {}
 export const loginName = /^(Log in(?: or sign up)?|Sign in|ログイン(?:または新規登録)?)$/i;
-const emailPattern = /^[^@\s]+@[^@\s]+$/;
+export const emailPattern = /^[^@\s]+@[^@\s]+$/;
 const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ|verify you are human|人間であることを確認/i;
 
 export interface Identity {

@@ -1,9 +1,9 @@
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { AccessBlockedError, assertAccess, loginName, observeAccount, type Account } from './account.ts';
 import { launchProfile } from './edge.ts';
-import { assertProfileDirectory, readRegularFile, type Profile } from './profiles.ts';
+import { assertProfileDirectory, type Profile } from './profiles.ts';
+import { readRegularFile, replaceRegularFile } from '../storage/files.ts';
 
 export interface Inspection {
   status: 'logged_in' | 'logged_out' | 'unknown';
@@ -37,16 +37,8 @@ export function classifyProfile(account: Account, loginVisible: boolean): Inspec
 }
 
 function writeAccessState(path: string, nextAllowed: number): void {
-  const statePath = join(path, '.gpt-usage-access.json');
-  readRegularFile(statePath);
-  const temporary = mkdtempSync('C:/dev/tmp/gpt-access-');
-  try {
-    const file = join(temporary, 'access.json');
-    writeFileSync(file, JSON.stringify({ next_allowed_at: new Date(nextAllowed).toISOString() }));
-    renameSync(file, statePath);
-  } finally {
-    rmSync(temporary, { recursive: true, force: true });
-  }
+  replaceRegularFile(join(path, '.gpt-usage-access.json'),
+    JSON.stringify({ next_allowed_at: new Date(nextAllowed).toISOString() }));
 }
 
 export function claimAccess(path: string, now = Date.now()): void {

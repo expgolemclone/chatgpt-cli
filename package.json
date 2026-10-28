@@ -1,9 +1,9 @@
 {
-  "name": "gpt-send-messages",
+  "name": "chatgpt-cli",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Send locally generated prompts through standalone dedicated Edge profiles on Windows.",
+  "description": "Manage dedicated ChatGPT Edge profiles, synchronize private ledgers, and send locally generated prompts on Windows.",
   "engines": {
     "node": ">=22.18.0"
   },
@@ -14,10 +14,14 @@
     "start": "node src/main.ts send"
   },
   "dependencies": {
-    "playwright": "1.64.1"
+    "csv-parse": "7.0.3",
+    "csv-stringify": "6.9.0",
+    "playwright": "1.64.1",
+    "proper-lockfile": "4.1.2"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/proper-lockfile": "4.1.4",
     "typescript": "^5.9.0"
   }
 }

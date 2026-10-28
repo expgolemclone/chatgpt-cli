@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
+import { readRegularFile } from '../storage/files.ts';
 
 export interface Profile { name: string; path: string; id?: string }
 const identityFile = '.gpt-usage-id';
@@ -48,13 +49,6 @@ export function assertProfileDirectory(path: string, required: boolean): void {
   if (required && !samePath(existing, path)) {
     throw new Error('Dedicated profile is missing. Run npm run login first, then sign in and close its Edge window.');
   }
-}
-
-export function readRegularFile(path: string): string | undefined {
-  const entry = lstatSync(path, { throwIfNoEntry: false });
-  if (!entry) return undefined;
-  if (!entry.isFile() || entry.isSymbolicLink()) throw new Error('Profile metadata must be a regular file.');
-  return readFileSync(path, 'utf8');
 }
 
 export function readProfileId(path: string): string | undefined {
