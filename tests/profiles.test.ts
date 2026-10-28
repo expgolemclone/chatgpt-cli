@@ -1,13 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { featurePath, fixture } from './fixtures/chat.ts';
-
-const edge = process.env.EDGE_EXECUTABLE ?? join(
-  process.env['ProgramFiles(x86)'] ?? 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe');
 
 test('parallel minimized profiles skip paid accounts, finish five rallies, and stop together on access blocks', async t => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-profiles-test-');
@@ -24,7 +21,10 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
       const allOpened = new Promise(resolve => { release = resolve; });
       chromium.launchPersistentContext = async (directory, options) => {
         const name = basename(directory);
-        const context = await launch(directory, options);
+        assert.equal(options.channel, 'msedge');
+        assert.equal(options.headless, false);
+        assert.ok(options.args.includes('--disable-sync'));
+        const context = await launch(directory, { ...options, args: [...options.args, '--disable-background-networking'] });
         const session = await context.newCDPSession(context.pages()[0]);
         await context.route('**/*', async route => {
           const target = new URL(route.request().url());
@@ -81,18 +81,14 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
     for (const [index, scenario] of scenarios.entries()) {
       await t.test(scenario.names.join(', '), () => {
         const root = join(temporary, String(index), 'profiles');
-        const profiles = scenario.names.map((name, id) => {
+        const profiles = scenario.names.map(name => {
           const path = join(root, name);
           mkdirSync(path, { recursive: true });
-          return { id: id.toString(16).padStart(32, '0'), name, path };
+          return { name, path };
         });
-        const manifest = join(temporary, `manifest-${index}.json`);
-        writeFileSync(manifest, JSON.stringify({
-          schemaVersion: 1, edgePath: edge, edgeArguments: ['--no-first-run', '--disable-background-networking'],
-          profileRoot: root, profiles,
-        }));
         const localAppData = join(temporary, String(index), 'localappdata');
-        const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, '--manifest', manifest,
+        const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, 'send',
+          ...profiles.flatMap(profile => ['--profile', profile.path]),
           ...(scenario.count === undefined ? [] : ['--questions', String(scenario.count)]), '--seed', 'fixture'], {
           encoding: 'utf8', timeout: scenario.count === undefined ? 160_000 : scenario.status ? 20_000 : 55_000,
           env: { ...process.env, LOCALAPPDATA: localAppData, FIXTURE_PROFILE_COUNT: String(profiles.length) },
@@ -131,6 +127,7 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
         assert.equal(records.at(-1).event, 'finished');
         assert.equal(records.at(-1).success, scenario.status === 0);
         assert.deepEqual(readdirSync(join(localAppData, 'gpt-send-messages')), ['logs']);
+        assert.equal(existsSync(join(localAppData, 'gpt-usage')), false);
       });
     }
   } finally {

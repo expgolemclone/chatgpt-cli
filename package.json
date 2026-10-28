@@ -3,14 +3,15 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Send locally generated prompts through dedicated Edge profiles.",
+  "description": "Send locally generated prompts through standalone dedicated Edge profiles on Windows.",
   "engines": {
     "node": ">=22.18.0"
   },
   "scripts": {
     "test": "tsc && node --test --test-concurrency=1 tests/*.test.ts",
-    "preview": "pwsh -NoProfile -File ./send-messages.ps1 -DryRun",
-    "start": "pwsh -NoProfile -File ./send-messages.ps1"
+    "login": "node src/main.ts login",
+    "preview": "node src/main.ts send --dry-run",
+    "start": "node src/main.ts send"
   },
   "dependencies": {
     "playwright": "1.64.1"
