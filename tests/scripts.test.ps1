@@ -15,8 +15,7 @@ try {
     $product = Join-Path $temporary 'gpt-send-messages'
     $null = New-Item -ItemType Directory -Path (Join-Path $usage 'src'), $product -Force
     Copy-Item -LiteralPath (Join-Path $root 'send-messages.ps1') -Destination $product
-    $null = New-Item -ItemType Directory -Path (Join-Path $product 'dist')
-    Copy-Item -LiteralPath (Join-Path $root 'dist/src') -Destination (Join-Path $product 'dist/src') -Recurse
+    Copy-Item -LiteralPath (Join-Path $root 'src') -Destination (Join-Path $product 'src') -Recurse
     $null = New-Item -ItemType Junction -Path (Join-Path $product 'node_modules') -Target (Join-Path $root 'node_modules')
     $profiles = Join-Path $temporary 'profiles'
     foreach ($name in @('one', 'two')) { $null = New-Item -ItemType Directory -Path (Join-Path $profiles $name) -Force }
@@ -59,6 +58,10 @@ Export-ModuleMember -Function Get-GptUsageModel
     foreach ($entry in $preview.profiles) {
         Assert-That ($entry.prompts.Count -eq 5) 'Default must generate five prompts per profile.'
     }
+    $null = New-Item -ItemType Directory -Path (Join-Path $product 'dist/src') -Force
+    [IO.File]::WriteAllText((Join-Path $product 'dist/src/main.js'), 'throw new Error("Stale build must never run.");')
+    $stale = ((& $send -DryRun -Seed test) -join "`n") | ConvertFrom-Json
+    Assert-That ($stale.profiles[0].prompts.Count -eq 5) 'Stale compiled output must not affect the source runner.'
     foreach ($count in @(1, 2)) {
         $override = ((& $send -DryRun -Profile one -QuestionCount $count -Seed test) -join "`n") | ConvertFrom-Json
         Assert-That ($override.profiles[0].prompts.Count -eq $count) 'Explicit counts must override the default.'

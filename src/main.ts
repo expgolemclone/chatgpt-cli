@@ -4,9 +4,9 @@ import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:pa
 import { fileURLToPath } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
-import { chromium, type BrowserContext } from 'playwright';
-import { AccessBlockedError, NonFreeAccountError, runChat } from './chat.js';
-import { generatePrompts } from './prompts/generate.js';
+import type { BrowserContext } from 'playwright';
+import { AccessBlockedError, NonFreeAccountError, runChat } from './chat.ts';
+import { generatePrompts } from './prompts/generate.ts';
 
 interface Profile { id: string; name: string; path: string }
 interface Manifest { schemaVersion: 1; edgePath: string; edgeArguments: string[]; profileRoot: string; profiles: Profile[] }
@@ -62,6 +62,7 @@ async function main(): Promise<void> {
     })) }, null, 2));
     return;
   }
+  const { chromium } = await import('playwright');
   if (!process.env.LOCALAPPDATA) throw new Error('LOCALAPPDATA is required.');
   const logs = join(process.env.LOCALAPPDATA, 'gpt-send-messages', 'logs');
   mkdirSync(logs, { recursive: true });

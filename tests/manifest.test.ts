@@ -4,8 +4,8 @@ import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { readManifest } from '../src/main.js';
-import { generatePrompts, maxPrompts } from '../src/prompts/generate.js';
+import { readManifest } from '../src/main.ts';
+import { generatePrompts, maxPrompts } from '../src/prompts/generate.ts';
 
 test('manifest and CLI use existing dedicated directories only', async t => {
   const temp = mkdtempSync('C:/dev/tmp/gpt-message-manifest-');
@@ -31,7 +31,7 @@ test('manifest and CLI use existing dedicated directories only', async t => {
     });
 
     check(manifest)();
-    const cli = fileURLToPath(new URL('../src/main.js', import.meta.url));
+    const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
     const localAppData = join(temp, 'localappdata');
     const run = (...args: string[]) => spawnSync(process.execPath, [cli, '--manifest', file, '--seed', 'test-seed', ...args], {
       encoding: 'utf8', timeout: 10_000, env: { ...process.env, LOCALAPPDATA: localAppData },

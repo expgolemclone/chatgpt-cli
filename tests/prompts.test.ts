@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { promptKinds } from '../src/prompts/catalog.js';
-import { generatePrompts, maxPrompts } from '../src/prompts/generate.js';
+import { promptKinds } from '../src/prompts/catalog.ts';
+import { generatePrompts, maxPrompts } from '../src/prompts/generate.ts';
 
 const catalog = promptKinds.flatMap(kind => kind.prompts.map(prompt => ({
   id: `${kind.id}-${prompt.id}`, text: kind.prefix + prompt.text,

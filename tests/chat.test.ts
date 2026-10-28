@@ -4,9 +4,9 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { chromium } from 'playwright';
-import { AccessBlockedError, NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.js';
-import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.js';
-import { accountCheck, featurePath, fixture } from './fixtures/chat.js';
+import { AccessBlockedError, NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
+import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.ts';
+import { accountCheck, featurePath, fixture } from './fixtures/chat.ts';
 
 const edge = process.env.EDGE_EXECUTABLE ?? (process.platform === 'win32'
   ? join(process.env['ProgramFiles(x86)'] ?? 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe')

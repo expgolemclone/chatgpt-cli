@@ -1,6 +1,6 @@
 import { setTimeout } from 'node:timers/promises';
 import type { Locator, Page, Response } from 'playwright';
-import type { Prompt } from './prompts/generate.js';
+import type { Prompt } from './prompts/generate.ts';
 
 export class AccessBlockedError extends Error {}
 export class ProfileNotReadyError extends Error {}

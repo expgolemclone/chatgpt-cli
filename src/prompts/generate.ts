@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { promptKinds } from './catalog.js';
+import { promptKinds } from './catalog.ts';
 
 export interface Prompt {
   id: string;

@@ -8,8 +8,7 @@
     "node": ">=22.18.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test dist/tests/*.test.js",
+    "test": "tsc && node --test --test-concurrency=1 tests/*.test.ts",
     "preview": "pwsh -NoProfile -File ./send-messages.ps1 -DryRun",
     "start": "pwsh -NoProfile -File ./send-messages.ps1"
   },

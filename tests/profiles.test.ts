@@ -4,12 +4,12 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { featurePath, fixture } from './fixtures/chat.js';
+import { featurePath, fixture } from './fixtures/chat.ts';
 
 const edge = process.env.EDGE_EXECUTABLE ?? join(
   process.env['ProgramFiles(x86)'] ?? 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe');
 
-test('all profiles launch minimized in parallel, retain their own 30-second interval, and stop together on access blocks', async t => {
+test('parallel minimized profiles skip paid accounts, finish five rallies, and stop together on access blocks', async t => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-profiles-test-');
   try {
     const preload = join(temporary, 'fixture.mjs');
@@ -66,7 +66,7 @@ test('all profiles launch minimized in parallel, retain their own 30-second inte
         return context;
       };
     `);
-    const cli = fileURLToPath(new URL('../src/main.js', import.meta.url));
+    const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
     const scenarios = [
       { names: ['paid', 'free'], count: 1, status: 0, submitted: ['free'], skipped: ['paid'] },
       { names: ['paid'], count: 1, status: 0, submitted: [], skipped: ['paid'] },
@@ -75,7 +75,8 @@ test('all profiles launch minimized in parallel, retain their own 30-second inte
       { names: ['submission-blocked', 'waiting'], count: 1, status: 1, submitted: ['submission-blocked'], skipped: [] },
       { names: ['submission-limited', 'waiting'], count: 1, status: 1, submitted: ['submission-limited'], skipped: [] },
       { names: ['delayed-blocked', 'free'], count: 2, status: 1, submitted: ['delayed-blocked', 'free'], skipped: [] },
-      { names: ['free-a', 'free-b'], count: 2, status: 0, submitted: ['free-a', 'free-a', 'free-b', 'free-b'], skipped: [] },
+      { names: ['free-a', 'free-b', 'paid'], count: undefined, status: 0,
+        submitted: ['free-a', 'free-b'].flatMap(name => Array<string>(5).fill(name)), skipped: ['paid'] },
     ];
     for (const [index, scenario] of scenarios.entries()) {
       await t.test(scenario.names.join(', '), () => {
@@ -92,8 +93,8 @@ test('all profiles launch minimized in parallel, retain their own 30-second inte
         }));
         const localAppData = join(temporary, String(index), 'localappdata');
         const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, '--manifest', manifest,
-          '--questions', String(scenario.count), '--seed', 'fixture'], {
-          encoding: 'utf8', timeout: scenario.status ? 20_000 : 55_000,
+          ...(scenario.count === undefined ? [] : ['--questions', String(scenario.count)]), '--seed', 'fixture'], {
+          encoding: 'utf8', timeout: scenario.count === undefined ? 160_000 : scenario.status ? 20_000 : 55_000,
           env: { ...process.env, LOCALAPPDATA: localAppData, FIXTURE_PROFILE_COUNT: String(profiles.length) },
         });
         assert.equal(result.error, undefined, result.stdout + result.stderr);
@@ -117,13 +118,15 @@ test('all profiles launch minimized in parallel, retain their own 30-second inte
         if (scenario.names.includes('free-a')) {
           const submissions = records.filter(record => record.event === 'sending');
           assert.equal(new Set(submissions.slice(0, 2).map(record => record.profile)).size, 2);
-          for (const name of scenario.names) {
+          for (const name of ['free-a', 'free-b']) {
             const times = submissions.filter(record => record.profile === name).map(record => Date.parse(record.time));
-            assert.equal(times.length, 2);
-            assert.ok(times[1]! - times[0]! >= 29_900, JSON.stringify(times));
+            assert.equal(times.length, 5);
+            for (let index = 1; index < times.length; index++) {
+              assert.ok(times[index]! - times[index - 1]! >= 29_900, JSON.stringify(times));
+            }
           }
           assert.ok(Math.abs(Date.parse(submissions[0].time) - Date.parse(submissions[1].time)) < 10_000);
-          assert.equal(records.filter(record => record.event === 'completed').length, 4);
+          assert.equal(records.filter(record => record.event === 'completed').length, 10);
         }
         assert.equal(records.at(-1).event, 'finished');
         assert.equal(records.at(-1).success, scenario.status === 0);

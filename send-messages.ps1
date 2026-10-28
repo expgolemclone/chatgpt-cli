@@ -20,8 +20,7 @@ if (-not $NodePath) {
         throw 'A mise-managed Node executable is required.'
     }
 }
-$cli = Join-Path $PSScriptRoot 'dist/src/main.js'
-if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw 'Run npm ci and npm run build first.' }
+$cli = Join-Path $PSScriptRoot 'src/main.ts'
 $modulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'gpt-usage/src/GptUsage.psm1'
 $module = Import-Module $modulePath -Force -PassThru
 
