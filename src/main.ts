@@ -16,20 +16,20 @@ const help = `chatgpt-cli
 Usage: node src/main.ts <login|open|profiles|inspect|sync|send> [options]
 
   login              Open one dedicated Edge profile for manual ChatGPT login.
-                     With --profile-root, create exactly one fresh marked profile.
+                     Without --profile, create exactly one fresh marked profile.
   open               Open existing profiles at ChatGPT Usage without checking login.
   login/open use ordinary installed Edge directly, without Playwright or debugging.
-  profiles           List owned direct profiles as JSON. Requires --profile-root.
+  profiles           List owned direct profiles as JSON.
   inspect            Confirm email and personal plan as JSON. Requires one --profile.
                      Never sends prompts or renames profiles.
   sync               Update an explicit ledger CSV and rename confirmed profiles.
-                     Requires --ledger and --profile-root or exactly one --profile.
+                     Requires --ledger. Uses the selected profile or collection.
                      Keeps other ledger rows and never sends prompts.
   send               Send locally generated prompts to signed-in free accounts.
 
   --profile PATH     Absolute dedicated user-data directory. Repeat for open/send.
-                     Default: %LOCALAPPDATA%/gpt-send-messages/profile
-  --profile-root PATH  Explicit collection of marked profiles, excluding archive.
+  --profile-root PATH  Collection of marked profiles, excluding archive.
+                       Default: %LOCALAPPDATA%/chatgpt-cli/profiles
                        Cannot be combined with --profile.
   --ledger PATH      Existing private CSV with kind,value,state columns. Sync only.
   --questions N      Prompts per profile (default: 5). Send only.
@@ -61,21 +61,26 @@ async function main(): Promise<void> {
   if (command !== 'send' && (values.questions !== undefined || values.seed !== undefined || values['dry-run'])) {
     throw new Error('Send options are not allowed for this command.');
   }
-  const root = values['profile-root'];
-  if (root !== undefined && values.profile !== undefined) throw new Error('Choose --profile-root or --profile, not both.');
-  if (command === 'profiles' && root === undefined) throw new Error('profiles requires --profile-root.');
-  if (command === 'inspect' && (root !== undefined || values.profile?.length !== 1)) {
+  if (values['profile-root'] !== undefined && values.profile !== undefined) {
+    throw new Error('Choose --profile-root or --profile, not both.');
+  }
+  if (command === 'profiles' && values.profile !== undefined) {
+    throw new Error('profiles does not accept --profile; use --profile-root.');
+  }
+  if (command === 'inspect' && (values['profile-root'] !== undefined || values.profile?.length !== 1)) {
     throw new Error('inspect requires exactly one --profile.');
   }
+  const root = values.profile === undefined
+    ? values['profile-root'] ?? join(process.env.LOCALAPPDATA!, 'chatgpt-cli', 'profiles') : undefined;
   if (command === 'sync') {
     if (!values.ledger || (root === undefined && values.profile?.length !== 1)) {
-      throw new Error('sync requires --ledger and --profile-root or exactly one --profile.');
+      throw new Error('sync requires --ledger and accepts at most one --profile.');
     }
     const results = await syncUsage(root === undefined ? { profile: values.profile![0]! } : { root }, values.ledger);
     console.log(JSON.stringify({ results }));
     return;
   }
-  const profiles = root === undefined ? resolveProfiles(values.profile ?? []) : listProfiles(root);
+  const profiles = root === undefined ? resolveProfiles(values.profile!) : listProfiles(root);
   if (login && root === undefined && profiles.length !== 1) throw new Error('login accepts only one --profile directory.');
   if (command === 'profiles') {
     console.log(JSON.stringify({ root: resolve(root!), profiles }));
@@ -85,7 +90,7 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ profile: profiles[0], ...await inspectProfile(profiles[0]!) }));
     return;
   }
-  if (command === 'send' && profiles.length === 0) throw new Error('No owned profiles in this collection. Run login first.');
+  if (command === 'send' && profiles.length === 0) throw new Error('No owned profiles in this collection. Run npm run login first.');
   const count = values.questions === undefined ? undefined : Number(values.questions);
   const seed = values.seed ?? randomUUID();
   const batches = profiles.map(profile => ({

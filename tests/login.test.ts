@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { launchProfile } from '../src/browser/edge.ts';
-import { createProfile } from '../src/browser/profiles.ts';
+import { createProfile, listProfiles } from '../src/browser/profiles.ts';
 import { closeWindow, manualPreload } from './fixtures/native-edge.ts';
 
 const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
@@ -34,13 +34,15 @@ test('ordinary Edge login persists data and is not launched or controlled by Pla
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
     const localAppData = join(temporary, 'localappdata');
-    const profilePath = join(localAppData, 'gpt-send-messages', 'profile');
+    const profileRoot = join(localAppData, 'chatgpt-cli', 'profiles');
+    let profilePath: string | undefined;
     const preload = join(temporary, 'fixture.mjs');
     const launches = join(temporary, 'launches.jsonl');
     writeFileSync(preload, manualPreload);
     for (const previous of ['null', 'retained']) {
       await t.test(previous === 'null' ? 'creates its own dedicated profile' : 'reopens it without copying browser data', async () => {
-        const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, 'login'], {
+        const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, 'login',
+          ...(profilePath === undefined ? [] : ['--profile', profilePath])], {
           encoding: 'utf8', timeout: 15_000, env: { ...process.env, LOCALAPPDATA: localAppData,
             FIXTURE_LAUNCHES: launches, FIXTURE_URL: `http://127.0.0.1:${address.port}/` },
         });
@@ -50,7 +52,12 @@ test('ordinary Edge login persists data and is not launched or controlled by Pla
         assert.equal(records.some(record => ['sending','sent','completed'].includes(record.event)), false);
         const launch = readFileSync(launches, 'utf8').trim().split('\n').map(line => JSON.parse(line)).at(-1)!;
         pids.push(launch.pid);
+        const profiles = listProfiles(profileRoot);
+        assert.equal(profiles.length, 1);
+        if (profilePath === undefined) profilePath = profiles[0]!.path;
         assert.equal(launch.directory, profilePath);
+        assert.equal(dirname(launch.directory), profileRoot);
+        assert.equal(readFileSync(join(launch.directory, '.gpt-usage-id'), 'utf8'), profiles[0]!.id);
         assert.equal(launch.url, 'https://chatgpt.com/');
         const deadline = Date.now() + 15_000;
         while (observed.length < pids.length && Date.now() < deadline) await setTimeout(100);
@@ -58,6 +65,7 @@ test('ordinary Edge login persists data and is not launched or controlled by Pla
         assert.equal(existsSync(join(profilePath, 'DevToolsActivePort')), false, 'Manual Edge has no debugging endpoint.');
         await closeWindow(launch.pid);
         assert.equal(existsSync(join(localAppData, 'gpt-usage')), false);
+        assert.equal(existsSync(join(localAppData, 'gpt-send-messages')), false);
       });
     }
   } finally {

@@ -14,10 +14,9 @@ const contains = (parent: string, child: string) => {
 /** Explicit paths have no inventory requirement. Collection roots discover only marked direct children. */
 export function resolveProfiles(paths: string[], localAppData = process.env.LOCALAPPDATA): Profile[] {
   if (!localAppData || !isAbsolute(localAppData)) throw new Error('LOCALAPPDATA must be an absolute directory.');
-  const directories = paths.length ? paths : [join(localAppData, 'gpt-send-messages', 'profile')];
   const profiles: Profile[] = [];
   const normalEdge = join(localAppData, 'Microsoft', 'Edge', 'User Data');
-  for (const value of directories) {
+  for (const value of paths) {
     if (!value || !isAbsolute(value)) throw new Error('--profile must be an absolute dedicated directory.');
     const path = resolve(value);
     if (contains(normalEdge, path) || contains(path, normalEdge)) {

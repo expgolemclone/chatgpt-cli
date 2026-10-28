@@ -27,8 +27,11 @@ function fixture() {
   return { temporary, root, ledger, profiles, dispose: () => rmSync(temporary, { recursive: true, force: true }) };
 }
 
-const run = (args: string[], preload?: string) => spawnSync(process.execPath,
-  [...(preload ? ['--import', pathToFileURL(preload).href] : []), cli, ...args], { encoding: 'utf8', timeout: 60_000 });
+const run = (temporary: string, args: string[], preload?: string) => spawnSync(process.execPath,
+  [...(preload ? ['--import', pathToFileURL(preload).href] : []), cli, ...args], {
+    encoding: 'utf8', timeout: 60_000,
+    env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
+  });
 
 test('standard CSV parsing preserves unrelated quoted and multiline fields and validates the email inventory', () => {
   const f = fixture();
@@ -173,7 +176,7 @@ test('profile and ledger locks exclude other CLI processes and release after ins
     const otherRoot = join(f.temporary, 'other-pc');
     createProfile(otherRoot);
     for (const root of [f.root, otherRoot]) {
-      const child = run(['sync', '--profile-root', root, '--ledger', f.ledger]);
+      const child = run(f.temporary, ['sync', '--profile-root', root, '--ledger', f.ledger]);
       assert.equal(child.error, undefined);
       assert.equal(child.status, 1, child.stdout + child.stderr);
       assert.match(child.stderr, /already being held/);
@@ -203,7 +206,7 @@ test('collection inspections remain sequential with thirty seconds after the pre
   } finally { f.dispose(); }
 });
 
-test('sync validates explicit inputs without creating profiles or changing other command behavior', async () => {
+test('sync requires a ledger and validates selections without creating profiles or changing other commands', async () => {
   const f = fixture();
   try {
     const missing = join(f.temporary, 'missing');
@@ -217,7 +220,7 @@ test('sync validates explicit inputs without creating profiles or changing other
       ['open', '--ledger', f.ledger], ['inspect', '--profile', f.profiles[0]!.path, '--ledger', f.ledger],
       ['send', '--dry-run', '--ledger', f.ledger],
     ]) {
-      const result = run(args);
+      const result = run(f.temporary, args);
       assert.equal(result.error, undefined);
       assert.equal(result.status, 1, JSON.stringify(args) + result.stdout + result.stderr);
       assert.equal(readFileSync(f.ledger, 'utf8'), fixtureCsv);
@@ -262,14 +265,14 @@ test('real standalone CLI inspects without renaming and syncs only after ordinar
         return browser;
       };
     `);
-    const inspected = run(['inspect', '--profile', f.profiles[0]!.path], preload);
+    const inspected = run(f.temporary, ['inspect', '--profile', f.profiles[0]!.path], preload);
     assert.equal(inspected.error, undefined, inspected.stdout + inspected.stderr);
     assert.equal(inspected.status, 0, inspected.stdout + inspected.stderr);
     assert.equal(JSON.parse(inspected.stdout).state, 'plus');
     assert.equal(inspected.stdout.includes('SECRET'), false);
     assert.equal(existsSync(f.profiles[0]!.path), true);
     assert.equal(readFileSync(f.ledger, 'utf8'), fixtureCsv);
-    const synced = run(['sync', '--profile', f.profiles[1]!.path, '--ledger', f.ledger], preload);
+    const synced = run(f.temporary, ['sync', '--profile', f.profiles[1]!.path, '--ledger', f.ledger], preload);
     assert.equal(synced.error, undefined, synced.stdout + synced.stderr);
     assert.equal(synced.status, 0, synced.stdout + synced.stderr);
     assert.equal(synced.stdout.includes('SECRET'), false);
@@ -279,7 +282,19 @@ test('real standalone CLI inspects without renaming and syncs only after ordinar
     assert.equal(readFileSync(join(renamed, '.gpt-usage-id'), 'utf8'), f.profiles[1]!.id);
     assert.equal(readFileSync(join(renamed, 'cookies.txt'), 'utf8'), 'existing browser data');
     assert.equal(existsSync(join(renamed, '.gpt-usage-access.json')), true);
-    assert.equal(readFileSync(closed, 'utf8'), 'closed\nclosed\n');
+    const defaultRoot = join(f.temporary, 'localappdata', 'chatgpt-cli', 'profiles');
+    const defaultProfile = createProfile(defaultRoot);
+    writeFileSync(join(defaultProfile.path, 'cookies.txt'), 'default browser data');
+    const defaultSynced = run(f.temporary, ['sync', '--ledger', f.ledger], preload);
+    assert.equal(defaultSynced.error, undefined, defaultSynced.stdout + defaultSynced.stderr);
+    assert.equal(defaultSynced.status, 0, defaultSynced.stdout + defaultSynced.stderr);
+    const defaultResults = JSON.parse(defaultSynced.stdout).results;
+    assert.equal(defaultResults.length, 1);
+    assert.equal(defaultResults[0].state, 'plus');
+    assert.equal(defaultResults[0].profile.path, join(defaultRoot, 'a@example.test'));
+    assert.equal(defaultResults[0].profile.id, defaultProfile.id);
+    assert.equal(readFileSync(join(defaultRoot, 'a@example.test', 'cookies.txt'), 'utf8'), 'default browser data');
+    assert.equal(readFileSync(closed, 'utf8'), 'closed\nclosed\nclosed\n');
     assert.equal(existsSync(f.profiles[0]!.path), true);
   } finally { f.dispose(); }
 });
