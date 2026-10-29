@@ -1,9 +1,17 @@
+import { setTimeout } from 'node:timers/promises';
 import type { Page, Response } from 'playwright';
 
 export class AccessBlockedError extends Error {}
 export const loginName = /^(Log in(?: or sign up)?|Sign in|ログイン(?:または新規登録)?)$/i;
 export const emailPattern = /^[^@\s]+@[^@\s]+$/;
-const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ|verify you are human|人間であることを確認/i;
+const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ/i;
+const challengeText = /verify (?:that )?you are human|verifying (?:that )?you are human|checking your browser|performing security verification|人間であることを確認/i;
+
+export interface AccessOptions {
+  challengeTimeoutMs?: number;
+  pollMs?: number;
+  signal?: AbortSignal;
+}
 
 export interface Identity {
   status: number; settled: boolean; validJson: boolean; email: string | null;
@@ -15,6 +23,8 @@ export interface Plan {
 }
 export interface Account {
   identity?: Identity; plan?: Plan;
+  navigationStatus?: number;
+  challenges?: Set<string>;
   block?: { status: number; path: string };
 }
 
@@ -57,8 +67,23 @@ export function observeAccount(page: Page, origin: string): { account: Account; 
     const chatRequest = /^\/backend-api\/(?:f\/conversation|sentinel)(?:\/|$)/.test(target.pathname);
     const mainDocument = response.request().isNavigationRequest() && response.frame() === page.mainFrame();
     const status = response.status();
-    if ((mainDocument || identityRequest || planRequest || chatRequest) && (status === 403 || status === 429)) {
-      account.block = { status, path: target.pathname };
+    if (mainDocument) {
+      account.navigationStatus = status;
+      identityRevision++;
+      planRevision++;
+      delete account.identity;
+      delete account.plan;
+    }
+    if (mainDocument || identityRequest || planRequest || chatRequest) {
+      if (response.headers()['cf-mitigated'] === 'challenge') {
+        (account.challenges ??= new Set()).add(target.pathname);
+      } else {
+        if (status === 403 || status === 429) account.block = { status, path: target.pathname };
+        if (response.ok()) {
+          if (mainDocument) account.challenges?.clear();
+          else account.challenges?.delete(target.pathname);
+        }
+      }
     }
     if (identityRequest) {
       const revision = ++identityRevision;
@@ -85,12 +110,22 @@ export function observeAccount(page: Page, origin: string): { account: Account; 
   } };
 }
 
-export async function assertAccess(page: Page, account: Account): Promise<void> {
-  if (page.isClosed()) throw new Error('Automation tab was closed. No retry will be attempted.');
-  if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`);
-  if (/just a moment|attention required/i.test(await page.title()) ||
-      blockedText.test(await page.locator('body').innerText()) ||
-      await page.locator('iframe[src*="challenges.cloudflare.com"]').first().isVisible()) {
-    throw new AccessBlockedError('Challenge or usage limit detected. Stopping the batch.');
+export async function assertAccess(page: Page, account: Account, options: AccessOptions = {}): Promise<number> {
+  let waitingSince: number | undefined;
+  const timeout = options.challengeTimeoutMs ?? 120_000;
+  for (;;) {
+    options.signal?.throwIfAborted();
+    if (page.isClosed()) throw new Error('Automation tab was closed. No retry will be attempted.');
+    if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`);
+    const body = await page.locator('body').innerText();
+    if (blockedText.test(body)) throw new AccessBlockedError('Usage limit detected. Stopping the batch.');
+    const challenged = Boolean(account.challenges?.size) || challengeText.test(body) ||
+      /just a moment|attention required/i.test(await page.title()) ||
+      await page.locator('iframe[src*="challenges.cloudflare.com"]').first().isVisible();
+    if (!challenged) return waitingSince === undefined ? 0 : Date.now() - waitingSince;
+    waitingSince ??= Date.now();
+    const remaining = waitingSince + timeout - Date.now();
+    if (remaining <= 0) throw new AccessBlockedError('Cloudflare challenge timed out. Stopping the batch.');
+    await setTimeout(Math.min(options.pollMs ?? 500, remaining), undefined, options.signal ? { signal: options.signal } : {});
   }
 }

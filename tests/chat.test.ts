@@ -6,7 +6,7 @@ import { launchProfile } from '../src/browser/edge.ts';
 import { NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
 import { AccessBlockedError } from '../src/browser/account.ts';
 import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.ts';
-import { accountCheck, featurePath, fixture } from './fixtures/chat.ts';
+import { accountCheck, challengeFixture, featurePath, fixture } from './fixtures/chat.ts';
 
 const prompt: Prompt = { id: 'test', text: 'Review this:\n```ts\nconst n = 3;\n```' };
 
@@ -20,12 +20,20 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   const failedRequests: string[] = [];
   const server = createServer(async (request, response) => {
     const failureStatus = failures.get(request.url ?? '');
-    if (failureStatus !== undefined) {
+    if (mode.startsWith('challenge-') && request.url === '/') {
+      response.writeHead(403, { 'content-type': 'text/html', 'cf-mitigated': 'challenge' });
+      response.end(challengeFixture(mode === 'challenge-stuck' ? undefined : mode === 'challenge-long' ? 61_000 : 600));
+    } else if (failureStatus !== undefined) {
       failedRequests.push(request.url!);
       response.writeHead(failureStatus, { 'content-type': 'application/json' });
       response.end('{}');
     } else if (request.url === '/backend-api/me') {
       identityRequests++;
+      if (['identity-challenge', 'multiple-challenges'].includes(mode) && identityRequests === 1) {
+        response.writeHead(403, { 'content-type': 'text/html', 'cf-mitigated': 'challenge' });
+        response.end(challengeFixture());
+        return;
+      }
       const status = mode === 'identity-forbidden' ? 403 : mode === 'identity-limited' ? 429
         : mode === 'identity-unauthorized' || (mode === 'identity-expires' && identityRequests > 1) ? 401 : 200;
       response.writeHead(status, { 'content-type': 'application/json' });
@@ -33,6 +41,11 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         : JSON.stringify(mode === 'identity-no-email' ? {} : { email: 'fixture@example.test' }));
     } else if (request.url?.startsWith(accountCheck)) {
       planRequests++;
+      if (['plan-challenge', 'multiple-challenges'].includes(mode) && planRequests === 1) {
+        response.writeHead(403, { 'content-type': 'text/html', 'cf-mitigated': 'challenge' });
+        response.end(challengeFixture());
+        return;
+      }
       const requestMode = mode;
       const status = requestMode === 'plan-forbidden' ? 403 : requestMode === 'plan-limited' ? 429
         : requestMode === 'plan-unauthorized' ? 401 : requestMode === 'plan-error' ? 500 : 200;
@@ -70,14 +83,14 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         response.write('data: started\n\n'); // Deliberately never finish the answer stream.
         return;
       }
-      const status = mode === 'submission-forbidden' ? 403 : mode === 'submission-limited' ? 429
+      const status = ['submission-forbidden', 'submission-challenge'].includes(mode) ? 403 : mode === 'submission-limited' ? 429
         : mode === 'submission-error' ? 500 : 200;
-      response.writeHead(status);
+      response.writeHead(status, mode === 'submission-challenge' ? { 'cf-mitigated': 'challenge' } : {});
       response.end('ok');
     } else {
       if (request.url === '/') navigations++;
       response.writeHead(mode === 'forbidden' ? 403 : 200, { 'content-type': 'text/html; charset=utf-8' });
-      response.end(fixture(mode));
+      response.end(fixture(mode === 'challenge-login' ? 'login' : mode));
     }
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -322,6 +335,120 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       } finally {
         failures.clear();
       }
+    });
+    await t.test('Cloudflare interstitials clear automatically without using the composer timeout or resending', async () => {
+      for (const value of ['challenge-clears', 'identity-challenge', 'plan-challenge', 'multiple-challenges']) {
+        mode = value; sent.length = 0; identityRequests = 0; planRequests = 0;
+        const events: string[] = [];
+        await runChat(page, [prompt], {
+          ...options, readyTimeoutMs: 350, onEvent: event => events.push(event),
+        });
+        assert.deepEqual(sent, [prompt.text], value);
+        assert.deepEqual(events, ['sending', 'sent', 'completed'], value);
+        assert.equal(identityRequests, ['identity-challenge', 'multiple-challenges'].includes(value) ? 2 : 1, value);
+        assert.equal(planRequests, ['plan-challenge', 'multiple-challenges'].includes(value) ? 2 : 1, value);
+      }
+    });
+    await t.test('the default Cloudflare grace period survives a real one-minute challenge', async () => {
+      mode = 'challenge-long'; sent.length = 0;
+      const started = Date.now();
+      await runChat(page, [prompt], { ...options, readyTimeoutMs: 350 });
+      assert.ok(Date.now() - started >= 61_000);
+      assert.deepEqual(sent, [prompt.text]);
+    });
+    await t.test('visible challenges wait before sending without interacting with verification controls', async () => {
+      for (const value of ['title', 'body', 'iframe']) {
+        mode = 'normal'; sent.length = 0;
+        await page.route('https://challenges.cloudflare.com/**', route => route.fulfill({ body: '' }));
+        try {
+          await runChat(page, [prompt], {
+            ...options, beforeSend: async () => {
+              await page.evaluate(value => {
+                const marker = document.createElement(value === 'iframe' ? 'iframe' : 'p');
+                if (value === 'title') document.title = 'Just a moment...';
+                if (value === 'body') marker.textContent = 'Verify you are human';
+                if (marker instanceof HTMLIFrameElement) marker.src = 'https://challenges.cloudflare.com/fixture';
+                marker.addEventListener('click', () => { throw new Error('Verification must not be clicked'); });
+                document.body.append(marker);
+                setTimeout(() => { document.title = 'Local chat fixture'; marker.remove(); }, 600);
+              }, value);
+            },
+          });
+          assert.deepEqual(sent, [prompt.text], value);
+        } finally {
+          await page.unroute('https://challenges.cloudflare.com/**');
+        }
+      }
+    });
+    await t.test('Cloudflare waiting pauses answer deadlines without resubmitting', async () => {
+      mode = 'normal'; sent.length = 0;
+      const events: string[] = [];
+      await runChat(page, [prompt, prompt], {
+        ...options, answerTimeoutMs: 350, onEvent: event => {
+          events.push(event);
+          if (event === 'sent') void page.evaluate(() => {
+            document.title = 'Just a moment...';
+            setTimeout(() => { document.title = 'Local chat fixture'; }, 600);
+          });
+        },
+      });
+      assert.deepEqual(sent, [prompt.text, prompt.text]);
+      assert.deepEqual(events, ['sending', 'sent', 'completed', 'sending', 'sent', 'completed']);
+    });
+    await t.test('Cloudflare waiting does not hide genuine HTTP blocks or usage limits', async () => {
+      for (const value of ['http', 'usage']) {
+        mode = 'normal'; sent.length = 0;
+        const started = Date.now();
+        await assert.rejects(runChat(page, [prompt], {
+          ...options, beforeSend: async () => {
+            await page.evaluate(value => {
+              document.title = 'Just a moment...';
+              if (value === 'usage') document.body.append("You've reached the usage limit");
+            }, value);
+            if (value === 'http') {
+              mode = 'identity-limited';
+              await page.evaluate(async () => { await fetch('/backend-api/me'); });
+            }
+          },
+        }), (error: unknown) => error instanceof AccessBlockedError &&
+          (value === 'http' ? /HTTP 429/.test(error.message) : /Usage limit detected/.test(error.message)));
+        assert.ok(Date.now() - started < 5000);
+        assert.deepEqual(sent, []);
+      }
+    });
+    await t.test('unresolved Cloudflare challenges time out without filling or submitting', async () => {
+      mode = 'challenge-stuck'; sent.length = 0;
+      const events: string[] = [];
+      await assert.rejects(runChat(page, [prompt, prompt], {
+        ...options, challengeTimeoutMs: 150, onEvent: event => events.push(event),
+      }), (error: unknown) => error instanceof AccessBlockedError && /Cloudflare challenge timed out/.test(error.message));
+      assert.deepEqual(sent, []);
+      assert.deepEqual(events, []);
+    });
+    await t.test('batch cancellation interrupts the Cloudflare grace period promptly', async () => {
+      mode = 'challenge-stuck'; sent.length = 0;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new Error('Test challenge cancelled')), 250);
+      try {
+        await assert.rejects(runChat(page, [prompt], {
+          ...options, pollMs: 10_000, signal: controller.signal,
+        }), /aborted|Test challenge cancelled/);
+        assert.deepEqual(sent, []);
+      } finally { clearTimeout(timer); }
+    });
+    await t.test('clearing a Cloudflare challenge does not replace authentication', async () => {
+      mode = 'challenge-login'; sent.length = 0;
+      await assert.rejects(runChat(page, [prompt], options), ProfileNotReadyError);
+      assert.deepEqual(sent, []);
+    });
+    await t.test('a challenged submission is never resent', async () => {
+      mode = 'submission-challenge'; sent.length = 0;
+      const events: string[] = [];
+      await assert.rejects(runChat(page, [prompt, prompt], {
+        ...options, challengeTimeoutMs: 150, onEvent: event => events.push(event),
+      }), AccessBlockedError);
+      assert.deepEqual(sent, [prompt.text]);
+      assert.deepEqual(events, ['sending']);
     });
     await t.test('403 and 429 main documents still stop before submission', async () => {
       try {

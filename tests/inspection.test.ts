@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { parseIdentity, parsePlan, type Account } from '../src/browser/account.ts';
 import { claimAccess, classifyProfile, inspectProfile } from '../src/browser/inspect.ts';
 import { createProfile, listProfiles, readProfileId } from '../src/browser/profiles.ts';
+import { challengeFixture } from './fixtures/chat.ts';
 
 const identity = { status: 200, settled: true, validJson: true, email: 'a@example.test' } as const;
 const plan = { status: 200, settled: true, personal: 'plus', sending: 'non-free' } as const;
@@ -98,7 +99,10 @@ test('real Edge inspection observes native responses, redacts credentials, persi
     requests++;
     assert.equal(request.method, 'GET');
     response.setHeader('content-type', 'application/json');
-    if (request.url === '/backend-api/me') {
+    if (mode.startsWith('challenge') && request.url === '/') {
+      response.writeHead(403, { 'content-type': 'text/html', 'cf-mitigated': 'challenge' });
+      response.end(challengeFixture(mode === 'challenge-stuck' ? undefined : 600));
+    } else if (request.url === '/backend-api/me') {
       response.statusCode = mode === 'blocked' ? 403 : 200;
       response.end(JSON.stringify({ email: 'a@example.test', accessToken: 'SECRET' }));
     } else if (request.url?.startsWith('/backend-api/accounts/check/')) {
@@ -126,6 +130,18 @@ test('real Edge inspection observes native responses, redacts credentials, persi
     const before = requests;
     assert.match((await inspectProfile(profile, { url })).reason, /access_cooldown/);
     assert.equal(requests, before);
+    mode = 'challenge-clears';
+    const challenged = createProfile(join(temporary, 'profiles'));
+    const cleared = await inspectProfile(challenged, { url, readyTimeoutMs: 350, pollMs: 20 });
+    assert.equal(cleared.status, 'logged_in');
+    assert.equal(cleared.email_address, 'a@example.test');
+    assert.equal(cleared.state, 'plus');
+    mode = 'challenge-stuck';
+    const unresolved = createProfile(join(temporary, 'profiles'));
+    const challengedAt = Date.now();
+    assert.match((await inspectProfile(unresolved, { url, challengeTimeoutMs: 150, pollMs: 20 })).reason, /access_blocked/);
+    const challengeCooldown = JSON.parse(readFileSync(join(unresolved.path, '.gpt-usage-access.json'), 'utf8'));
+    assert.ok(Date.parse(challengeCooldown.next_allowed_at) >= challengedAt + 30 * 60_000);
     mode = 'blocked';
     const blocked = createProfile(join(temporary, 'profiles'));
     const blockedAt = Date.now();

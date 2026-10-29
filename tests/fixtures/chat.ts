@@ -1,6 +1,12 @@
 export const accountCheck = '/backend-api/accounts/check/v4-2023-04-27';
 export const featurePath = '/backend-api/bazaar/obi/sync-token';
 
+export function challengeFixture(delayMs?: number): string {
+  return `<!doctype html><title>Just a moment...</title><body>Verify you are human.
+    ${delayMs === undefined ? '' : `<script>setTimeout(() => location.replace('/?challenge=cleared'), ${delayMs});</script>`}
+  </body>`;
+}
+
 export function fixture(mode: string): string {
   return `<!doctype html><html><head><title>Local chat fixture</title></head><body>
   ${['login', 'conflicting-login'].includes(mode) ? '<button>ログイン</button>' : mode === 'collapsed' ? '' : mode === 'modern'
@@ -14,6 +20,10 @@ export function fixture(mode: string): string {
     const mode = ${JSON.stringify(mode)};
     if (mode !== 'identity-missing') fetch('/backend-api/me');
     if (mode !== 'plan-missing') fetch('${accountCheck}?timezone_offset_min=0');
+    if (['identity-challenge', 'multiple-challenges'].includes(mode)) setTimeout(() => fetch('/backend-api/me'), 600);
+    if (['plan-challenge', 'multiple-challenges'].includes(mode)) {
+      setTimeout(() => fetch('${accountCheck}'), mode === 'multiple-challenges' ? 150 : 600);
+    }
     if (mode === 'feature-failure') fetch('${featurePath}');
     const composer = document.querySelector('[role="textbox"]');
     if (mode === 'modern') composer.addEventListener('input', () => {

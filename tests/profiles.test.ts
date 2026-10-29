@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { featurePath, fixture } from './fixtures/chat.ts';
+import { challengeFixture, featurePath, fixture } from './fixtures/chat.ts';
 
 test('parallel minimized profiles skip paid accounts, finish five rallies, and stop together on access blocks', async t => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-profiles-test-');
@@ -59,7 +59,10 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
             await allOpened;
             const { bounds } = await session.send('Browser.getWindowForTarget');
             assert.equal(bounds.windowState, 'minimized');
-            console.log(JSON.stringify({ event: 'fixture-navigated', profile: name }));
+            if (!target.search) console.log(JSON.stringify({ event: 'fixture-navigated', profile: name }));
+            if (name === 'challenge' && !target.search) return route.fulfill({ status: 403,
+              headers: { 'cf-mitigated': 'challenge' }, contentType: 'text/html',
+              body: ${JSON.stringify(challengeFixture(750))} });
             return route.fulfill({ status: name === 'blocked' ? 403 : 200,
               contentType: 'text/html; charset=utf-8', body: ${JSON.stringify(fixture('feature-failure'))} });
           }
@@ -75,6 +78,7 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
     const scenarios = [
       { names: ['paid', 'free'], count: 1, status: 0, submitted: ['free'], skipped: ['paid'] },
       { names: ['paid'], count: 1, status: 0, submitted: [], skipped: ['paid'] },
+      { names: ['challenge', 'free'], count: 1, status: 0, submitted: ['challenge', 'free'], skipped: [] },
       { names: ['feature-limited'], count: 1, status: 0, submitted: ['feature-limited'], skipped: [] },
       { names: ['blocked', 'waiting'], count: 1, status: 1, submitted: [], skipped: [] },
       { names: ['submission-blocked', 'waiting'], count: 1, status: 1, submitted: ['submission-blocked'], skipped: [] },

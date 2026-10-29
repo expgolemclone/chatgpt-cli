@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
-import { AccessBlockedError, assertAccess, loginName, observeAccount, type Account } from './account.ts';
+import { AccessBlockedError, assertAccess, loginName, observeAccount, type AccessOptions, type Account } from './account.ts';
 import { launchProfile } from './edge.ts';
 import { assertProfileDirectory, type Profile } from './profiles.ts';
 import { readRegularFile, replaceRegularFile } from '../storage/files.ts';
@@ -57,7 +57,7 @@ export function claimAccess(path: string, now = Date.now()): void {
 }
 
 /** Inspect one profile without submitting messages or issuing private API requests. */
-export async function inspectProfile(profile: Profile, options: { url?: string; readyTimeoutMs?: number } = {}): Promise<Inspection> {
+export async function inspectProfile(profile: Profile, options: AccessOptions & { url?: string; readyTimeoutMs?: number } = {}): Promise<Inspection> {
   let stage = 'browser_launch';
   let edge: Awaited<ReturnType<typeof launchProfile>> | undefined;
   let observation: ReturnType<typeof observeAccount> | undefined;
@@ -73,12 +73,13 @@ export async function inspectProfile(profile: Profile, options: { url?: string; 
     stage = 'profile';
     const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
     if (!response) throw new InspectionError('navigation_http_none');
-    if (response.status() !== 200) throw new InspectionError(`navigation_http_${response.status()}`);
+    await assertAccess(page, observation.account, options);
+    if (observation.account.navigationStatus !== 200) throw new InspectionError(`navigation_http_${observation.account.navigationStatus}`);
     if (new URL(page.url()).origin !== origin) throw new InspectionError('navigation_origin_changed');
     const login = page.getByText(loginName).first();
-    const deadline = Date.now() + (options.readyTimeoutMs ?? 15_000);
+    let deadline = Date.now() + (options.readyTimeoutMs ?? 15_000);
     while (Date.now() < deadline) {
-      await assertAccess(page, observation.account);
+      deadline += await assertAccess(page, observation.account, options);
       if (await login.isVisible()) {
         await setTimeout(1500);
         if (await login.isVisible()) break;
@@ -86,7 +87,7 @@ export async function inspectProfile(profile: Profile, options: { url?: string; 
       if (observation.account.identity?.settled && observation.account.plan?.settled) break;
       await setTimeout(250);
     }
-    await assertAccess(page, observation.account);
+    await assertAccess(page, observation.account, options);
     return classifyProfile(observation.account, await login.isVisible());
   } catch (error) {
     const reason = error instanceof InspectionError ? error.message : error instanceof AccessBlockedError

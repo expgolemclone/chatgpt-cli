@@ -1,16 +1,14 @@
 import { setTimeout } from 'node:timers/promises';
 import type { Locator, Page, Response } from 'playwright';
 import type { Prompt } from './prompts/generate.ts';
-import { assertAccess, loginName, observeAccount } from './browser/account.ts';
+import { assertAccess, loginName, observeAccount, type AccessOptions } from './browser/account.ts';
 export class ProfileNotReadyError extends Error {}
 export class NonFreeAccountError extends Error {}
 
-export interface ChatOptions {
+export interface ChatOptions extends AccessOptions {
   url?: string;
   readyTimeoutMs?: number;
   answerTimeoutMs?: number;
-  pollMs?: number;
-  signal?: AbortSignal;
   beforeSend?: () => Promise<void>;
   onEvent?: (event: 'sending' | 'sent' | 'completed', prompt: Prompt) => void;
 }
@@ -38,17 +36,18 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
   const turns = page.locator('[data-talvt-turn-state]');
   const guard = async () => {
     options.signal?.throwIfAborted();
-    await assertAccess(page, account);
+    const pausedMs = await assertAccess(page, account, options);
     if (account.plan?.sending === 'non-free') throw new NonFreeAccountError('Non-free account detected; this profile will be skipped.');
     if (await page.getByRole('button', { name: loginName }).or(
       page.getByRole('link', { name: loginName })).first().isVisible()) {
       throw new ProfileNotReadyError('Login required; manual login is needed.');
     }
+    return pausedMs;
   };
   const waitUntil = async (condition: () => Promise<boolean>, timeout: number, label: string) => {
-    const deadline = Date.now() + timeout;
+    let deadline = Date.now() + timeout;
     do {
-      await guard();
+      deadline += await guard();
       if (await condition()) return;
       await setTimeout(pollMs, undefined, cancellation);
     } while (Date.now() < deadline);

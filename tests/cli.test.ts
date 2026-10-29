@@ -27,6 +27,7 @@ test('standalone CLI resolves its own dedicated profiles without another project
         assert.match(result.stdout, /No PowerShell 7 or other project/);
         assert.match(result.stdout, /Send force-closes only selected dedicated Edge profiles/);
         assert.match(result.stdout, /Other commands never terminate existing browser windows/);
+        assert.match(result.stdout, /challenges wait up to 2 minutes for automatic completion/);
         assert.match(result.stdout, /%LOCALAPPDATA%\/chatgpt-cli\/profiles/);
         assert.doesNotMatch(result.stdout, /gpt-send-messages/);
         assert.equal(existsSync(localAppData), false);
