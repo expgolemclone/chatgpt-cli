@@ -76,7 +76,7 @@ test('ordinary Edge login persists data and is not launched or controlled by Pla
   }
 });
 
-test('busy ordinary Edge profiles reject attachment without terminating or unlocking their browser', async () => {
+test('inspection and send dry-run never terminate or unlock a busy browser', async () => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-native-lock-');
   const profile = createProfile(join(temporary, 'profiles'));
   const edge = await launchProfile(profile);
@@ -84,14 +84,12 @@ test('busy ordinary Edge profiles reject attachment without terminating or unloc
     const page = edge.context.pages()[0]!;
     await page.setContent('<title>Keep existing browser</title>');
     const run = (command: string) => spawnSync(process.execPath, [cli, command, '--profile', profile.path,
-      ...(command === 'send' ? ['--questions','1'] : [])], {
+      ...(command === 'send' ? ['--questions', '1', '--dry-run'] : [])], {
       encoding: 'utf8', timeout: 25_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
     });
     const sent = run('send');
-    assert.equal(sent.status, 1, sent.stdout + sent.stderr);
-    const records = sent.stdout.trim().split('\n').map(line => JSON.parse(line));
-    assert.equal(records.some(record => record.event === 'sending'), false);
-    assert.equal(records.at(-1).success, false);
+    assert.equal(sent.status, 0, sent.stdout + sent.stderr);
+    assert.equal(JSON.parse(sent.stdout).profiles[0].prompts.length, 1);
     const inspected = run('inspect');
     assert.equal(inspected.status, 0, inspected.stdout + inspected.stderr);
     assert.equal(JSON.parse(inspected.stdout).status, 'unknown');

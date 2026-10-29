@@ -10,7 +10,7 @@ import { readRegularFile } from '../storage/files.ts';
 const edgeArguments = ['--no-first-run', '--no-default-browser-check', '--disable-sync',
   '--disable-features=msImplicitSignin,msEnableWebToBrowserSignIn,msEnableAADWebToBrowserSignIn,msSeamlessWebToBrowserSignIn,msEdgeOnRampImport,msEdgeFRESpartanImportAllowed,msEdgeContinuousMigrationUser'];
 
-function edgeExecutable(): string {
+export function edgeExecutable(): string {
   const value = execFileSync('reg.exe',
     ['query', 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\msedge.exe', '/ve'],
     { encoding: 'utf8', windowsHide: true }).match(/REG_SZ\s+([^\r\n]+)/)?.[1]?.trim();
@@ -18,7 +18,7 @@ function edgeExecutable(): string {
   return value;
 }
 
-function assertIdentity(profile: Profile): void {
+export function assertIdentity(profile: Profile): void {
   assertProfileDirectory(profile.path, true);
   if (profile.id !== undefined && readProfileId(profile.path) !== profile.id) {
     throw new Error('Profile identity changed before launch.');
@@ -94,7 +94,13 @@ export async function launchProfile(profile: Profile): Promise<{ context: Browse
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       if (!running(process)) throw new Error('Edge exited before CDP; close any window using this profile.');
-      const value = readRegularFile(marker);
+      let value: string | undefined;
+      try {
+        value = readRegularFile(marker);
+      } catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || error.code !== 'EBUSY') throw error;
+        // Edge briefly locks this file while publishing its endpoint. It is not ready yet.
+      }
       if (value !== undefined) {
         const { port, endpoint } = parseEndpoint(value);
         const owners = listeners(port);

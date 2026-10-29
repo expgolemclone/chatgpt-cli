@@ -46,7 +46,7 @@ export function assertProfileDirectory(path: string, required: boolean): void {
     throw new Error('Profile directory and its ancestors must be regular, unlinked directories.');
   }
   if (required && !samePath(existing, path)) {
-    throw new Error('Dedicated profile is missing. Run npm run login first, then sign in and close its Edge window.');
+    throw new Error('Dedicated profile is missing. Run npm run login first, then sign in.');
   }
 }
 

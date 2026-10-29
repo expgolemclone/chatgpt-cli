@@ -25,7 +25,8 @@ Usage: node src/main.ts <login|open|profiles|inspect|sync|send> [options]
   sync               Update an explicit ledger CSV and rename confirmed profiles.
                      Requires --ledger. Uses the selected profile or collection.
                      Keeps other ledger rows and never sends prompts.
-  send               Send locally generated prompts to signed-in free accounts.
+  send               Terminate selected profiles' running Edge processes, then send
+                     locally generated prompts to signed-in free accounts.
 
   --profile PATH     Absolute dedicated user-data directory. Repeat for open/send.
   --profile-root PATH  Collection of marked profiles, excluding archive.
@@ -38,9 +39,9 @@ Usage: node src/main.ts <login|open|profiles|inspect|sync|send> [options]
   --help             Show this help.
 
 Requires Windows, Node.js, and Microsoft Edge. No PowerShell 7 or other project
-is needed. Existing browser windows are never terminated or unlocked. Close
-windows using a selected profile before running. HTTP blocks, challenges, and
-usage limits stop the batch. Uncertain submissions are never retried.
+is needed. Send force-closes only selected dedicated Edge profiles; unsaved drafts
+may be lost. Other commands never terminate existing browser windows. HTTP blocks,
+challenges, and usage limits stop the batch. Uncertain submissions are never retried.
 This tool does not create accounts or upgrade their plans.
 `;
 
@@ -122,6 +123,10 @@ async function main(): Promise<void> {
     }
     log('finished', { success: true });
     return;
+  }
+  const { terminateProfiles } = await import('./browser/processes.ts');
+  for (const { profile, pid } of await terminateProfiles(profiles)) {
+    log('profile-terminated', { profile: profile.name, pid });
   }
   const stop = new AbortController();
   const results = await Promise.allSettled(batches.map(async ({ profile, prompts }) => {

@@ -16,7 +16,8 @@ export const manualPreload = `
     const directory = args.find(arg => arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
     assert.ok(args.includes('--new-window'));
     const url = args.at(-1);
-    const process = spawn(file, [...args.slice(0,-1), globalThis.process.env.FIXTURE_URL], options);
+    const padding = globalThis.process.env.FIXTURE_PADDING ? ['--fixture-padding=' + 'x'.repeat(900)] : [];
+    const process = spawn(file, [...padding, ...args.slice(0,-1), globalThis.process.env.FIXTURE_URL], options);
     process.once('spawn', () => appendFileSync(globalThis.process.env.FIXTURE_LAUNCHES,
       JSON.stringify({pid:process.pid,directory,url,args})+'\\n'));
     return process;
