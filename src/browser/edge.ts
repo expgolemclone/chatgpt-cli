@@ -82,8 +82,16 @@ export async function launchProfile(profile: Profile): Promise<{ context: Browse
     } finally {
       if (!await waitForExit(process, 10_000)) {
         // Only the process created here can be terminated, never an existing Edge instance.
-        execFileSync('taskkill.exe', ['/PID', String(process.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-        if (!await waitForExit(process, 10_000)) throw new Error('Owned Edge process did not exit.');
+        let terminationError: unknown;
+        try {
+          execFileSync('taskkill.exe', ['/PID', String(process.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+        } catch (error) {
+          terminationError = error;
+        }
+        // taskkill can report an already-exited child after successfully terminating the parent.
+        if (!await waitForExit(process, 10_000)) {
+          throw new Error('Owned Edge process did not exit.', { cause: terminationError });
+        }
       }
       await browser?.close();
       const endpoint = readRegularFile(marker);
