@@ -77,7 +77,8 @@ export function fixture(mode: string): string {
           '<button data-testid="generated-image-preview"><img alt="生成画像1" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%221%22 height=%221%22/%3E"></button>');
       } else {
         const answer = document.createElement('p');
-        answer.textContent = 'Local fixture answer';
+        answer.textContent = mode === 'quoted-access-text'
+          ? "You've reached the usage limit. Verify you are human." : 'Local fixture answer';
         turn.append(answer);
       }
       if (mode === 'identity-expires') await (await fetch('/backend-api/me')).text();

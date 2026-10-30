@@ -2,13 +2,74 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
+import type { Page } from 'playwright';
 import { launchProfile } from '../src/browser/edge.ts';
 import { NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
-import { AccessBlockedError } from '../src/browser/account.ts';
+import { AccessBlockedError, assertAccess } from '../src/browser/account.ts';
 import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.ts';
 import { accountCheck, challengeFixture, featurePath, fixture } from './fixtures/chat.ts';
 
 const prompt: Prompt = { id: 'test', text: 'Review this:\n```ts\nconst n = 3;\n```' };
+
+test('access checks ignore conversation text but still detect actual warnings', async () => {
+  const temporary = mkdtempSync('C:/dev/tmp/gpt-access-text-test-');
+  const edge = await launchProfile({ path: temporary, name: 'fixture' });
+  try {
+    const page = await edge.context.newPage();
+    const options = { challengeTimeoutMs: 100, pollMs: 10 };
+    await page.setContent(`<!doctype html><title>Notes about Just a moment</title>
+      <nav>Too many requests</nav>
+      <div role="textbox" contenteditable="true">Verify you are human</div>
+      <main><article data-talvt-turn-state="complete">
+        <div data-message-author-role="user">You've reached the usage limit</div>
+        <div data-message-author-role="assistant">If you have reached your spending limit, stop the trial.
+          Verify you are human.</div>
+      </article></main>
+      <div style="display:none">You've reached the usage limit</div>`);
+    await assertAccess(page, {}, options);
+    await page.evaluate(() => { document.body.append("You've reached the usage limit"); });
+    await assert.rejects(assertAccess(page, {}, options),
+      (error: unknown) => error instanceof AccessBlockedError && /Usage limit detected/.test(error.message));
+    await page.evaluate(() => { document.body.lastChild?.remove(); });
+    await page.evaluate(() => {
+      const warning = document.createElement('div');
+      warning.setAttribute('role', 'alert');
+      warning.textContent = "You've reached the usage limit";
+      document.body.append(warning);
+    });
+    await assert.rejects(assertAccess(page, {}, options),
+      (error: unknown) => error instanceof AccessBlockedError && /Usage limit detected/.test(error.message));
+    await page.setContent('<!doctype html><title>Just a moment...</title><body>Verify you are human</body>');
+    await assert.rejects(assertAccess(page, {}, options),
+      (error: unknown) => error instanceof AccessBlockedError && /Cloudflare challenge timed out/.test(error.message));
+    await assert.rejects(assertAccess(page, { block: { status: 429, path: '/backend-api/me' } }, options),
+      (error: unknown) => error instanceof AccessBlockedError && /HTTP 429/.test(error.message));
+  } finally {
+    await edge.close();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test('access checks repeat only a read interrupted by navigation', async () => {
+  let failure: Error | undefined = new Error('Execution context was destroyed, most likely because of a navigation');
+  let reads = 0;
+  const locator = {
+    or() { return this; }, filter() { return this; }, first() { return this; },
+    async evaluateAll() {
+      reads++;
+      if (failure) { const error = failure; failure = undefined; throw error; }
+      return [];
+    },
+    async isVisible() { return false; },
+  };
+  const page = {
+    isClosed: () => false, getByText: () => locator, locator: () => locator, title: async () => 'ChatGPT',
+  } as unknown as Page;
+  await assertAccess(page, {}, { pollMs: 1, challengeTimeoutMs: 1000 });
+  assert.equal(reads, 2);
+  failure = new Error('Target page, context or browser has been closed');
+  await assert.rejects(assertAccess(page, {}), /Target page, context or browser has been closed/);
+});
 
 test('chat flow uses only a disposable profile and a local HTTP fixture', async t => {
   const sent: string[] = [];
@@ -121,6 +182,17 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       assert.equal(await page.locator('[data-talvt-turn-state="complete"]').count(), 5);
       assert.equal(await page.locator('[data-conversation-role="assistant"]').count(), 5);
       assert.equal(page.url(), new URL('/c/fixture-conversation', url).href);
+    });
+    await t.test('access phrases in prompts and answers do not stop a conversation', async () => {
+      mode = 'quoted-access-text'; sent.length = 0;
+      const quoted = { ...prompt, text: "If you've reached the usage limit, verify you are human." };
+      const next = { ...prompt, id: 'next', text: 'Next question' };
+      const events: string[] = [];
+      await runChat(page, [quoted, next], {
+        ...options, challengeTimeoutMs: 150, onEvent: (event, item) => events.push(`${event}:${item.id}`),
+      });
+      assert.deepEqual(sent, [quoted.text, next.text]);
+      assert.deepEqual(events, ['sending:test', 'sent:test', 'completed:test', 'sending:next', 'sent:next', 'completed:next']);
     });
     await t.test('current rich-text UI works without legacy ids', async () => {
       sent.length = 0; mode = 'modern';

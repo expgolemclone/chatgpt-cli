@@ -6,6 +6,8 @@ export const loginName = /^(Log in(?: or sign up)?|Sign in|ログイン(?:また
 export const emailPattern = /^[^@\s]+@[^@\s]+$/;
 const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ/i;
 const challengeText = /verify (?:that )?you are human|verifying (?:that )?you are human|checking your browser|performing security verification|人間であることを確認/i;
+const accessText = new RegExp(`${blockedText.source}|${challengeText.source}`, 'i');
+const conversationContent = '[data-talvt-turn-state], [data-message-author-role], [data-user-message-bubble], [role="textbox"], nav, aside';
 
 export interface AccessOptions {
   challengeTimeoutMs?: number;
@@ -117,15 +119,33 @@ export async function assertAccess(page: Page, account: Account, options: Access
     options.signal?.throwIfAborted();
     if (page.isClosed()) throw new Error('Automation tab was closed. No retry will be attempted.');
     if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`);
-    const body = await page.locator('body').innerText();
-    if (blockedText.test(body)) throw new AccessBlockedError('Usage limit detected. Stopping the batch.');
-    const challenged = Boolean(account.challenges?.size) || challengeText.test(body) ||
-      /just a moment|attention required/i.test(await page.title()) ||
-      await page.locator('iframe[src*="challenges.cloudflare.com"]').first().isVisible();
-    if (!challenged) return waitingSince === undefined ? 0 : Date.now() - waitingSince;
+    let notices: string[] | undefined;
+    try {
+      notices = await page.getByText(accessText).or(page.locator('body')).filter({ visible: true }).evaluateAll((elements, excluded) =>
+        elements.map(element => {
+          if (element.closest(excluded)) return '';
+          if (!element.querySelector(excluded)) return element instanceof HTMLElement ? element.innerText : element.textContent ?? '';
+          // The body itself may contain a warning as a direct text node alongside the conversation.
+          return Array.from(element.childNodes).filter(node => node.nodeType === Node.TEXT_NODE)
+            .map(node => node.textContent).join(' ');
+        }), conversationContent);
+    } catch (error) {
+      // A challenge can navigate while its text is being read. Only repeat the read, never a submission.
+      if (!(error instanceof Error) || !error.message.includes('Execution context was destroyed')) throw error;
+    }
+    if (notices !== undefined) {
+      if (notices.some(text => blockedText.test(text))) throw new AccessBlockedError('Usage limit detected. Stopping the batch.');
+      const challenged = Boolean(account.challenges?.size) || notices.some(text => challengeText.test(text)) ||
+        /^(?:just a moment\.{0,3}|attention required!?(?:\s*\|.*)?)$/i.test((await page.title()).trim()) ||
+        await page.locator('iframe[src*="challenges.cloudflare.com"]').first().isVisible();
+      if (!challenged) return waitingSince === undefined ? 0 : Date.now() - waitingSince;
+    }
     waitingSince ??= Date.now();
     const remaining = waitingSince + timeout - Date.now();
-    if (remaining <= 0) throw new AccessBlockedError('Cloudflare challenge timed out. Stopping the batch.');
+    if (remaining <= 0) {
+      if (notices === undefined) throw new Error('Page navigation did not settle. No retry will be attempted.');
+      throw new AccessBlockedError('Cloudflare challenge timed out. Stopping the batch.');
+    }
     await setTimeout(Math.min(options.pollMs ?? 500, remaining), undefined, options.signal ? { signal: options.signal } : {});
   }
 }
