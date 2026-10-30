@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { assertProfileDirectory, createProfile, resolveProfiles } from '../src/browser/profiles.ts';
-import { generatePrompts, maxPrompts } from '../src/prompts/generate.ts';
+import { generateBatches, maxPrompts } from '../src/prompts/generate.ts';
 
 const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
@@ -68,8 +68,9 @@ test('standalone CLI resolves its own dedicated profiles without another project
           assert.equal(result.status, 0, result.stdout + result.stderr);
           assert.deepEqual(JSON.parse(result.stdout), {
             seed: 'test-seed',
-            profiles: profiles.map(profile => ({
-              name: profile.name, prompts: generatePrompts(profile.path.toLowerCase(), 'test-seed', count),
+            profiles: profiles.map((profile, index) => ({
+              name: profile.name,
+              prompts: generateBatches(profiles.map(item => item.path.toLowerCase()), 'test-seed', count)[index],
             })),
           });
           assert.equal(existsSync(join(localAppData, 'chatgpt-cli', 'logs')), false);
@@ -82,9 +83,41 @@ test('standalone CLI resolves its own dedicated profiles without another project
       const result = run('send', '--dry-run', '--seed', 'batch', ...paths.flatMap(path => ['--profile', path]));
       assert.equal(result.status, 0, result.stdout + result.stderr);
       assert.deepEqual(JSON.parse(result.stdout).profiles.map((profile: { prompts: unknown }) => profile.prompts),
-        paths.map(path => generatePrompts(path.toLowerCase(), 'batch')));
+        generateBatches(paths.map(path => path.toLowerCase()), 'batch'));
       for (const path of paths) assert.equal(existsSync(path), false);
       assert.equal(existsSync(localAppData), false);
+    });
+    await t.test('preview uses attempted history across profiles without changing the logs', () => {
+      const paths = [join(temporary, 'preview-one'), join(temporary, 'preview-two')];
+      const ids = paths.map(path => path.toLowerCase());
+      const initial = generateBatches(ids, 'history');
+      const attempted = initial[0]![0]!.id;
+      const planned = initial[0]![1]!.id;
+      const time = '2026-01-01T00:00:00.000Z';
+      const contents = [
+        JSON.stringify({ event: 'sending', time, promptId: attempted }),
+        JSON.stringify({ event: 'profile-failed', time }),
+        JSON.stringify({ event: 'planned', time, promptId: planned }),
+      ].join('\n') + '\n';
+      const logs = join(localAppData, 'chatgpt-cli', 'logs');
+      try {
+        mkdirSync(logs, { recursive: true });
+        const log = join(logs, 'old.jsonl');
+        writeFileSync(log, contents);
+        const args = ['send', '--dry-run', '--seed', 'history', ...paths.flatMap(path => ['--profile', path])];
+        const first = run(...args);
+        const second = run(...args);
+        assert.equal(first.status, 0, first.stdout + first.stderr);
+        assert.equal(second.status, 0, second.stdout + second.stderr);
+        assert.equal(first.stdout, second.stdout);
+        const actual = JSON.parse(first.stdout).profiles.map((profile: { prompts: { id: string }[] }) => profile.prompts);
+        assert.deepEqual(actual, generateBatches(ids, 'history', 5, new Map([[attempted, Date.parse(time)]])));
+        assert.equal(new Set(actual.flat().map((prompt: { id: string }) => prompt.id)).size, 10);
+        assert.equal(actual.flat().some((prompt: { id: string }) => prompt.id === attempted), false);
+        assert.deepEqual(readdirSync(logs), ['old.jsonl']);
+        assert.equal(readFileSync(log, 'utf8'), contents);
+        for (const path of paths) assert.equal(existsSync(path), false);
+      } finally { rmSync(localAppData, { recursive: true, force: true }); }
     });
     await t.test('invalid commands, counts, paths, and login options fail before side effects', () => {
       const cases = [

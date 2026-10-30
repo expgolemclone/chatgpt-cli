@@ -6,7 +6,7 @@ import type { Page } from 'playwright';
 import { launchProfile } from '../src/browser/edge.ts';
 import { NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
 import { AccessBlockedError, assertAccess } from '../src/browser/account.ts';
-import { generatePrompts, maxPrompts, type Prompt } from '../src/prompts/generate.ts';
+import { generateBatches, maxPrompts, type Prompt } from '../src/prompts/generate.ts';
 import { accountCheck, challengeFixture, featurePath, fixture } from './fixtures/chat.ts';
 
 const prompt: Prompt = { id: 'test', text: 'Review this:\n```ts\nconst n = 3;\n```' };
@@ -46,7 +46,7 @@ test('access checks ignore conversation text but still detect actual warnings', 
       (error: unknown) => error instanceof AccessBlockedError && /HTTP 429/.test(error.message));
   } finally {
     await edge.close();
-    rmSync(temporary, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });
 
@@ -167,7 +167,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   try {
     await t.test('completes five rallies in one conversation with one native identity and plan check', async () => {
       sent.length = 0; mode = 'normal'; navigations = 0; identityRequests = 0; planRequests = 0;
-      const prompts = generatePrompts('a', 'default-batch');
+      const prompts = generateBatches(['a'], 'default-batch')[0]!;
       assert.equal(prompts.length, 5);
       const events: string[] = [];
       await runChat(page, prompts, {
@@ -202,7 +202,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       assert.equal(sent[1], 'Next modern question');
     });
     await t.test('complete code review, image, and Codex prompts reach both composer variants', async () => {
-      const generated = generatePrompts('a', 'mixed-chat', maxPrompts);
+      const generated = generateBatches(['a'], 'mixed-chat', maxPrompts)[0]!;
       const prompts = [generated.find(item => item.id.startsWith('code-review-'))!,
         generated.find(item => item.id.startsWith('image-'))!,
         generated.find(item => item.id.startsWith('codex-'))!];
@@ -316,7 +316,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
     });
     await t.test('native login loss during the same conversation prevents another submission', async () => {
       mode = 'identity-expires'; identityRequests = 0; sent.length = 0;
-      await assert.rejects(runChat(page, [prompt, prompt], { ...options, readyTimeoutMs: 350 }), ProfileNotReadyError);
+      await assert.rejects(runChat(page, [prompt, prompt], options), ProfileNotReadyError);
       assert.equal(sent.length, 1);
       assert.equal(identityRequests, 2);
     });
@@ -325,7 +325,9 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       await assert.rejects(runChat(page, [prompt], {
         ...options, beforeSend: async () => {
           mode = 'identity-unauthorized';
+          const response = page.waitForResponse(response => new URL(response.url()).pathname === '/backend-api/me');
           await page.evaluate(async () => { await fetch('/backend-api/me'); });
+          await (await response).body();
         },
       }), ProfileNotReadyError);
       assert.equal(sent.length, 0);
@@ -619,7 +621,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
     await edge.close();
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    rmSync(temporary, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });
 

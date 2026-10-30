@@ -151,6 +151,6 @@ test('real Edge inspection observes native responses, redacts credentials, persi
   } finally {
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
-    rmSync(temporary, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });

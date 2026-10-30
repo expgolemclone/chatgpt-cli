@@ -72,7 +72,7 @@ test('ordinary Edge login persists data and is not launched or controlled by Pla
     for (const pid of pids) await closeWindow(pid);
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
-    rmSync(temporary, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });
 
@@ -82,7 +82,7 @@ test('inspection and send dry-run never terminate or unlock a busy browser', asy
   const edge = await launchProfile(profile);
   try {
     const page = edge.context.pages()[0]!;
-    await page.setContent('<title>Keep existing browser</title>');
+    await page.goto('data:text/html,' + encodeURIComponent('<title>Keep existing browser</title>'));
     const run = (command: string) => spawnSync(process.execPath, [cli, command, '--profile', profile.path,
       ...(command === 'send' ? ['--questions', '1', '--dry-run'] : [])], {
       encoding: 'utf8', timeout: 25_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
@@ -97,6 +97,6 @@ test('inspection and send dry-run never terminate or unlock a busy browser', asy
     assert.equal(existsSync(join(profile.path, 'DevToolsActivePort')), true);
   } finally {
     await edge.close();
-    rmSync(temporary, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });

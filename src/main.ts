@@ -9,7 +9,8 @@ import { AccessBlockedError } from './browser/account.ts';
 import { launchProfile, openProfile } from './browser/edge.ts';
 import { inspectProfile } from './browser/inspect.ts';
 import { assertProfileDirectory, createProfile, listProfiles, resolveProfiles } from './browser/profiles.ts';
-import { generatePrompts } from './prompts/generate.ts';
+import { generateBatches } from './prompts/generate.ts';
+import { readPromptHistory } from './prompts/history.ts';
 import { syncUsage } from './usage/sync.ts';
 
 const help = `chatgpt-cli
@@ -34,7 +35,7 @@ Usage: node src/main.ts <login|open|profiles|inspect|sync|send> [options]
                        Cannot be combined with --profile.
   --ledger PATH      Existing private CSV with kind,value,state columns. Sync only.
   --questions N      Prompts per profile (default: 5). Send only.
-  --seed TEXT        Reproducible prompt selection. Send only.
+  --seed TEXT        Reproduce a selection with unchanged profiles and prompt logs.
   --dry-run          Preview prompts without opening Edge or writing files. Send only.
   --help             Show this help.
 
@@ -43,6 +44,8 @@ is needed. Send force-closes only selected dedicated Edge profiles; unsaved draf
 may be lost. Other commands never terminate existing browser windows. Cloudflare
 challenges wait up to 2 minutes for automatic completion. HTTP blocks, usage limits,
 and unresolved challenges stop the batch. Uncertain submissions are never retried.
+Prompt selection reads previous sending events from the local logs. Simultaneous
+send commands can overlap, and removing logs removes their prompt history.
 This tool does not create accounts or upgrade their plans.
 `;
 
@@ -95,9 +98,11 @@ async function main(): Promise<void> {
   if (command === 'send' && profiles.length === 0) throw new Error('No owned profiles in this collection. Run npm run login first.');
   const count = values.questions === undefined ? undefined : Number(values.questions);
   const seed = values.seed ?? randomUUID();
-  const batches = profiles.map(profile => ({
-    profile, prompts: command === 'send' ? generatePrompts(profile.path.toLowerCase(), seed, count) : [],
-  }));
+  const logs = join(process.env.LOCALAPPDATA!, 'chatgpt-cli', 'logs');
+  const promptBatches = command === 'send'
+    ? generateBatches(profiles.map(profile => profile.path.toLowerCase()), seed, count, readPromptHistory(logs))
+    : profiles.map(() => []);
+  const batches = profiles.map((profile, index) => ({ profile, prompts: promptBatches[index]! }));
   if (values['dry-run']) {
     console.log(JSON.stringify({ seed, profiles: batches.map(({ profile, prompts }) => ({ name: profile.name, prompts })) }, null, 2));
     return;
@@ -108,7 +113,6 @@ async function main(): Promise<void> {
     for (const profile of profiles) assertProfileDirectory(profile.path, !login);
     if (login) mkdirSync(profiles[0]!.path, { recursive: true });
   }
-  const logs = join(process.env.LOCALAPPDATA!, 'chatgpt-cli', 'logs');
   mkdirSync(logs, { recursive: true });
   const logFile = join(logs, `${new Date().toISOString().replaceAll(':', '-')}-${randomUUID()}.jsonl`);
   const log = (event: string, details: Record<string, unknown> = {}) => {

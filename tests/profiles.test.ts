@@ -32,41 +32,45 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
         const session = await context.newCDPSession(context.pages()[0]);
         await assert.rejects(session.send('Browser.getBrowserCommandLine'), /--enable-automation.*not set/);
         await context.route('**/*', async route => {
-          const target = new URL(route.request().url());
-          if (target.origin !== 'https://chatgpt.com') return route.abort();
-          if (target.pathname === '/backend-api/me') {
-            if (name === 'waiting') {
-              await new Promise(resolve => context.once('close', resolve));
-              return;
+          try {
+            const target = new URL(route.request().url());
+            if (target.origin !== 'https://chatgpt.com') return await route.abort();
+            if (target.pathname === '/backend-api/me') {
+              if (name === 'waiting') {
+                await new Promise(resolve => context.once('close', resolve));
+                return;
+              }
+              return await route.fulfill({ json: { email: 'fixture@example.test' } });
             }
-            return route.fulfill({ json: { email: 'fixture@example.test' } });
+            if (target.pathname.startsWith('/backend-api/accounts/check/')) {
+              return await route.fulfill({ json: { accounts: { default: { account: { plan_type: name === 'paid' ? 'plus' : 'free' } } } } });
+            }
+            if (target.pathname === ${JSON.stringify(featurePath)}) {
+              return await route.fulfill({ status: name === 'feature-limited' ? 429 : 403, json: {} });
+            }
+            if (target.pathname === '/backend-api/f/conversation') {
+              const { bounds } = await session.send('Browser.getWindowForTarget');
+              assert.equal(bounds.windowState, 'minimized');
+              console.log(JSON.stringify({ event: 'fixture-submitted', profile: name, time: Date.now() }));
+              if (name === 'delayed-blocked') await setTimeout(1500);
+              return await route.fulfill({ status: name === 'submission-blocked' ? 403
+                : ['submission-limited', 'delayed-blocked'].includes(name) ? 429 : 200, body: 'ok' });
+            }
+            if (route.request().isNavigationRequest()) {
+              await allOpened;
+              const { bounds } = await session.send('Browser.getWindowForTarget');
+              assert.equal(bounds.windowState, 'minimized');
+              if (!target.search) console.log(JSON.stringify({ event: 'fixture-navigated', profile: name }));
+              if (name === 'challenge' && !target.search) return await route.fulfill({ status: 403,
+                headers: { 'cf-mitigated': 'challenge' }, contentType: 'text/html',
+                body: ${JSON.stringify(challengeFixture(750))} });
+              return await route.fulfill({ status: name === 'blocked' ? 403 : 200,
+                contentType: 'text/html; charset=utf-8', body: ${JSON.stringify(fixture('feature-failure'))} });
+            }
+            return await route.abort();
+          } catch (error) {
+            if (!String(error).includes('Target page, context or browser has been closed')) throw error;
           }
-          if (target.pathname.startsWith('/backend-api/accounts/check/')) {
-            return route.fulfill({ json: { accounts: { default: { account: { plan_type: name === 'paid' ? 'plus' : 'free' } } } } });
-          }
-          if (target.pathname === ${JSON.stringify(featurePath)}) {
-            return route.fulfill({ status: name === 'feature-limited' ? 429 : 403, json: {} });
-          }
-          if (target.pathname === '/backend-api/f/conversation') {
-            const { bounds } = await session.send('Browser.getWindowForTarget');
-            assert.equal(bounds.windowState, 'minimized');
-            console.log(JSON.stringify({ event: 'fixture-submitted', profile: name, time: Date.now() }));
-            if (name === 'delayed-blocked') await setTimeout(1500);
-            return route.fulfill({ status: name === 'submission-blocked' ? 403
-              : ['submission-limited', 'delayed-blocked'].includes(name) ? 429 : 200, body: 'ok' });
-          }
-          if (route.request().isNavigationRequest()) {
-            await allOpened;
-            const { bounds } = await session.send('Browser.getWindowForTarget');
-            assert.equal(bounds.windowState, 'minimized');
-            if (!target.search) console.log(JSON.stringify({ event: 'fixture-navigated', profile: name }));
-            if (name === 'challenge' && !target.search) return route.fulfill({ status: 403,
-              headers: { 'cf-mitigated': 'challenge' }, contentType: 'text/html',
-              body: ${JSON.stringify(challengeFixture(750))} });
-            return route.fulfill({ status: name === 'blocked' ? 403 : 200,
-              contentType: 'text/html; charset=utf-8', body: ${JSON.stringify(fixture('feature-failure'))} });
-          }
-          return route.abort();
         });
         context.on('close', () => console.log(JSON.stringify({ event: 'fixture-profile-closed', profile: name })));
         console.log(JSON.stringify({ event: 'fixture-profile-opened', profile: name }));
@@ -106,9 +110,9 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
         assert.equal(result.status, scenario.status, result.stdout + result.stderr);
         const records = result.stdout.trim().split('\n').map(line => JSON.parse(line));
         const profilesFor = (event: string) => records.filter(record => record.event === event).map(record => record.profile).sort();
-        assert.deepEqual(profilesFor('fixture-submitted'), scenario.submitted);
-        assert.deepEqual(profilesFor('fixture-profile-opened'), [...scenario.names].sort());
-        assert.deepEqual(profilesFor('fixture-profile-closed'), [...scenario.names].sort());
+        assert.deepEqual(profilesFor('fixture-submitted'), scenario.submitted, result.stdout + result.stderr);
+        assert.deepEqual(profilesFor('fixture-profile-opened'), [...scenario.names].sort(), result.stdout + result.stderr);
+        assert.deepEqual(profilesFor('fixture-profile-closed'), [...scenario.names].sort(), result.stdout + result.stderr);
         const navigated = profilesFor('fixture-navigated');
         if (scenario.status === 0) {
           assert.deepEqual(navigated, [...scenario.names].sort());
@@ -140,6 +144,6 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
       });
     }
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });

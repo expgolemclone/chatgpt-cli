@@ -90,6 +90,6 @@ for (const useDefault of [true, false]) test(`collection CLI discovers marked pr
     for (const pid of pids) await closeWindow(pid);
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
-    rmSync(temporary, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });

@@ -50,7 +50,8 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     observed.length = 0;
     other = await launchProfile(untouched);
     const otherPage = other.context.pages()[0]!;
-    await otherPage.setContent('<title>Keep this other profile open</title>');
+    await otherPage.goto('data:text/html,' + encodeURIComponent('<title>Keep this other profile open</title>'));
+    assert.equal(await otherPage.title(), 'Keep this other profile open');
 
     const launches = join(temporary, 'launches.jsonl');
     const manual = join(temporary, 'manual.mjs');
@@ -71,7 +72,8 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     const run = (...args: string[]) => execute(process.execPath, [cli, ...args], {
       encoding: 'utf8', timeout: 20_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
     });
-    await run('send', '--profile', selected.path, '--questions', '1', '--dry-run');
+    const before = JSON.parse((await run('send', '--profile', selected.path, '--questions', '1',
+      '--seed', 'restart-fixture', '--dry-run')).stdout);
     await assert.rejects(run('send', '--profile', selected.path, '--questions', '0'), /Prompt count must be/);
     assert.doesNotThrow(() => process.kill(ordinaryPid!, 0), 'Read-only and invalid invocations never kill Edge.');
     const denied = join(temporary, 'deny-termination.mjs');
@@ -149,12 +151,16 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     assert.equal(records.filter(record => record.event === 'fixture-submitted').length, 1);
     assert.equal(records.filter(record => record.event === 'sent').length, 1);
     assert.equal(records.filter(record => record.event === 'completed').length, 1);
+    assert.equal(records.find(record => record.event === 'sending').promptId, before.profiles[0].prompts[0].id);
+    const after = JSON.parse((await run('send', '--profile', selected.path, '--questions', '1',
+      '--seed', 'restart-fixture', '--dry-run')).stdout);
+    assert.notEqual(after.profiles[0].prompts[0].id, before.profiles[0].prompts[0].id);
     assert.equal(records.at(-1).success, true);
     assert.throws(() => process.kill(ordinaryPid!, 0), 'The pre-existing selected browser was terminated.');
     if (marked) assert.equal(readFileSync(join(selected.path, '.gpt-usage-id'), 'utf8'), created.id);
     else assert.equal(existsSync(join(selected.path, '.gpt-usage-id')), false);
     assert.equal(readFileSync(join(untouched.path, '.gpt-usage-id'), 'utf8'), untouched.id);
-    assert.equal(await otherPage.title(), 'Keep this other profile open');
+    assert.equal(await otherPage.title(), 'Keep this other profile open', `Other page URL: ${otherPage.url()}`);
     assert.equal(existsSync(join(untouched.path, 'DevToolsActivePort')), true);
     assert.equal(existsSync(join(selected.path, 'DevToolsActivePort')), false);
   } finally {
@@ -162,6 +168,6 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     await other?.close();
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
-    rmSync(temporary, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });
