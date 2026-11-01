@@ -1,7 +1,7 @@
 import { setTimeout } from 'node:timers/promises';
 import type { Locator, Page, Response } from 'playwright';
 import type { Prompt } from './prompts/generate.ts';
-import { assertAccess, loginName, observeAccount, type AccessOptions } from './browser/account.ts';
+import { AccessBlockedError, assertAccess, loginName, observeAccount, type AccessOptions, type ChallengeEvent } from './browser/account.ts';
 export class ProfileNotReadyError extends Error {}
 export class NonFreeAccountError extends Error {}
 
@@ -30,13 +30,16 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
   const answerTimeoutMs = options.answerTimeoutMs ?? 600_000;
   const cancellation = options.signal ? { signal: options.signal } : {};
   const actionOptions = { timeout: readyTimeoutMs, ...cancellation };
-  const { account, dispose } = observeAccount(page, origin);
+  let stage: NonNullable<ChallengeEvent['stage']> = 'navigation';
+  const onChallenge = (event: ChallengeEvent) => options.onChallenge?.({ ...event, stage });
+  const accessOptions = { ...options, onChallenge };
+  const { account, dispose } = observeAccount(page, origin, onChallenge);
   const hasFreePlan = () => account.plan?.sending === 'free';
   const stopped = page.getByTestId('stop-button').or(page.getByRole('button', { name: stopName })).first();
   const turns = page.locator('[data-talvt-turn-state]');
   const guard = async () => {
     options.signal?.throwIfAborted();
-    const pausedMs = await assertAccess(page, account, options);
+    const pausedMs = await assertAccess(page, account, accessOptions);
     if (account.plan?.sending === 'non-free') throw new NonFreeAccountError('Non-free account detected; this profile will be skipped.');
     if (await page.getByRole('button', { name: loginName }).or(
       page.getByRole('link', { name: loginName })).first().isVisible()) {
@@ -56,11 +59,21 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
 
   try {
     options.signal?.throwIfAborted();
-    await page.goto(url, { waitUntil: 'domcontentloaded', ...actionOptions });
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', ...actionOptions });
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`, { cause: error });
+      if (account.challenges?.size) {
+        throw new AccessBlockedError('Cloudflare challenge prevented navigation. Stopping the batch.', { cause: error });
+      }
+      throw error;
+    }
     const composer = page.getByRole('textbox', {
       name: /ChatGPT に聞く|Ask anything|Ask ChatGPT|Message ChatGPT/i,
     }).filter({ visible: true }).first();
     for (const prompt of prompts) {
+      stage = 'readiness';
       const readiness = { signedIn: false, freePlan: false, composerVisible: false, composerEditable: false, generating: false };
       try {
         await waitUntil(async () => {
@@ -77,6 +90,7 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
         }
         throw error;
       }
+      stage = 'submission';
       const previousTurns = await turns.count();
       await composer.fill(prompt.text, actionOptions); // Replace any existing draft instead of appending to it.
       // The rich-text editor normalizes paragraphs/blank lines during fill. Compare its
@@ -113,6 +127,7 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       if (!acknowledgement.ok()) {
         throw new Error(`Submission rejected: HTTP ${acknowledgement.status()}. No automatic resend will be attempted.`);
       }
+      stage = 'answer';
       options.onEvent?.('sent', prompt);
       await waitUntil(async () => {
         if (await turns.count() !== previousTurns + 1 || await stopped.isVisible()) return false;

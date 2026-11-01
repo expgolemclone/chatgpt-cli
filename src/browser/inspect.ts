@@ -69,7 +69,7 @@ export async function inspectProfile(profile: Profile, options: AccessOptions & 
     page.setDefaultTimeout(5000);
     const url = options.url ?? 'https://chatgpt.com/#settings/Account';
     const origin = new URL(url).origin;
-    observation = observeAccount(page, origin);
+    observation = observeAccount(page, origin, options.onChallenge);
     stage = 'profile';
     const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
     if (!response) throw new InspectionError('navigation_http_none');
@@ -90,9 +90,9 @@ export async function inspectProfile(profile: Profile, options: AccessOptions & 
     await assertAccess(page, observation.account, options);
     return classifyProfile(observation.account, await login.isVisible());
   } catch (error) {
-    const reason = error instanceof InspectionError ? error.message : error instanceof AccessBlockedError
-      ? observation?.account.block ? `http_${observation.account.block.status}` : 'access_blocked'
-      : error instanceof Error ? error.name : 'Error';
+    const reason = observation?.account.block ? `http_${observation.account.block.status}`
+      : observation?.account.challenges?.size || error instanceof AccessBlockedError ? 'access_blocked'
+      : error instanceof InspectionError ? error.message : error instanceof Error ? error.name : 'Error';
     if (/http_(403|429)|access_blocked/.test(reason)) writeAccessState(profile.path, Date.now() + 30 * 60_000);
     return result('unknown', `${stage}:${reason}`);
   } finally {

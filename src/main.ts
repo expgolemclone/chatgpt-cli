@@ -160,10 +160,11 @@ async function main(): Promise<void> {
           if (event === 'sending') lastSend = Date.now();
           log(event, { profile: profile.name, promptId: prompt.id, url: page.url() });
         },
+        onChallenge: event => log('challenge', { profile: profile.name, ...event }),
       });
     } catch (error) {
       if (error instanceof AccessBlockedError && !stop.signal.aborted) {
-        log('batch-stopped', { reason: 'Access blocked; stopping further submissions in every profile.' });
+        log('batch-stopped', { profile: profile.name, reason: 'Access blocked; stopping further submissions in every profile.' });
         stop.abort(new Error('Batch stopped because another profile encountered an access block.'));
       }
       throw error;

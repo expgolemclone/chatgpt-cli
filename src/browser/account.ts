@@ -9,10 +9,22 @@ const challengeText = /verify (?:that )?you are human|verifying (?:that )?you ar
 const accessText = new RegExp(`${blockedText.source}|${challengeText.source}`, 'i');
 const conversationContent = '[data-talvt-turn-state], [data-message-author-role], [data-user-message-bubble], [role="textbox"], nav, aside';
 
+export interface ChallengeResponse {
+  request: 'document' | 'identity' | 'plan' | 'conversation' | 'sentinel';
+  status: number;
+}
+type ChallengeIndicator = 'response' | 'text' | 'title' | 'iframe' | 'page-unavailable';
+export type ChallengeEvent = (
+  | { phase: 'response'; response: ChallengeResponse }
+  | { phase: 'waiting' | 'cleared' | 'timed-out'; indicators: ChallengeIndicator[];
+      responses: ChallengeResponse[]; elapsedMs: number }
+) & { stage?: 'navigation' | 'readiness' | 'submission' | 'answer' };
+
 export interface AccessOptions {
   challengeTimeoutMs?: number;
   pollMs?: number;
   signal?: AbortSignal;
+  onChallenge?: (event: ChallengeEvent) => void;
 }
 
 export interface Identity {
@@ -26,7 +38,7 @@ export interface Plan {
 export interface Account {
   identity?: Identity; plan?: Plan;
   navigationStatus?: number;
-  challenges?: Set<string>;
+  challenges?: Map<string, ChallengeResponse>;
   block?: { status: number; path: string };
 }
 
@@ -57,7 +69,7 @@ export function parsePlan(value: unknown): Pick<Plan, 'personal' | 'sending'> {
 }
 
 /** Observe only normal application responses. Keep neither bodies nor credentials. */
-export function observeAccount(page: Page, origin: string): { account: Account; dispose: () => void } {
+export function observeAccount(page: Page, origin: string, onChallenge?: AccessOptions['onChallenge']): { account: Account; dispose: () => void } {
   const account: Account = {};
   let identityRevision = 0;
   let planRevision = 0;
@@ -78,7 +90,11 @@ export function observeAccount(page: Page, origin: string): { account: Account; 
     }
     if (mainDocument || identityRequest || planRequest || chatRequest) {
       if (response.headers()['cf-mitigated'] === 'challenge') {
-        (account.challenges ??= new Set()).add(target.pathname);
+        const request: ChallengeResponse['request'] = mainDocument ? 'document' : identityRequest ? 'identity'
+          : planRequest ? 'plan' : target.pathname.startsWith('/backend-api/f/conversation') ? 'conversation' : 'sentinel';
+        const challenge = { request, status };
+        (account.challenges ??= new Map()).set(target.pathname, challenge);
+        onChallenge?.({ phase: 'response', response: challenge });
       } else {
         if (status === 403 || status === 429) account.block = { status, path: target.pathname };
         if (response.ok()) {
@@ -114,14 +130,15 @@ export function observeAccount(page: Page, origin: string): { account: Account; 
 
 export async function assertAccess(page: Page, account: Account, options: AccessOptions = {}): Promise<number> {
   let waitingSince: number | undefined;
+  let lastSnapshot: string | undefined;
   const timeout = options.challengeTimeoutMs ?? 120_000;
   for (;;) {
     options.signal?.throwIfAborted();
     if (page.isClosed()) throw new Error('Automation tab was closed. No retry will be attempted.');
     if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`);
-    let notices: string[] | undefined;
+    let snapshot: { indicators: ChallengeIndicator[]; responses: ChallengeResponse[] } | undefined;
     try {
-      notices = await page.getByText(accessText).or(page.locator('body')).filter({ visible: true }).evaluateAll((elements, excluded) =>
+      const notices = await page.getByText(accessText).or(page.locator('body')).filter({ visible: true }).evaluateAll((elements, excluded) =>
         elements.map(element => {
           if (element.closest(excluded)) return '';
           if (!element.querySelector(excluded)) return element instanceof HTMLElement ? element.innerText : element.textContent ?? '';
@@ -129,21 +146,38 @@ export async function assertAccess(page: Page, account: Account, options: Access
           return Array.from(element.childNodes).filter(node => node.nodeType === Node.TEXT_NODE)
             .map(node => node.textContent).join(' ');
         }), conversationContent);
-    } catch (error) {
-      // A challenge can navigate while its text is being read. Only repeat the read, never a submission.
-      if (!(error instanceof Error) || !error.message.includes('Execution context was destroyed')) throw error;
-    }
-    if (notices !== undefined) {
       if (notices.some(text => blockedText.test(text))) throw new AccessBlockedError('Usage limit detected. Stopping the batch.');
-      const challenged = Boolean(account.challenges?.size) || notices.some(text => challengeText.test(text)) ||
-        /^(?:just a moment\.{0,3}|attention required!?(?:\s*\|.*)?)$/i.test((await page.title()).trim()) ||
-        await page.locator('iframe[src*="challenges.cloudflare.com"]').first().isVisible();
-      if (!challenged) return waitingSince === undefined ? 0 : Date.now() - waitingSince;
+      const indicators: ChallengeIndicator[] = [];
+      const responses = [...(account.challenges?.values() ?? [])];
+      if (responses.length) indicators.push('response');
+      if (notices.some(text => challengeText.test(text))) indicators.push('text');
+      if (/^(?:just a moment\.{0,3}|attention required!?(?:\s*\|.*)?)$/i.test((await page.title()).trim())) indicators.push('title');
+      if (await page.locator('iframe[src*="challenges.cloudflare.com"]').first().isVisible()) indicators.push('iframe');
+      snapshot = { indicators, responses };
+    } catch (error) {
+      // A challenge can navigate during these reads. Only repeat the reads, never a submission.
+      if (!(error instanceof Error) || !error.message.includes('Execution context was destroyed')) throw error;
+      const responses = [...(account.challenges?.values() ?? [])];
+      if (responses.length) snapshot = { indicators: ['response', 'page-unavailable'], responses };
+    }
+    if (snapshot) {
+      if (!snapshot.indicators.length) {
+        const elapsedMs = waitingSince === undefined ? 0 : Date.now() - waitingSince;
+        if (lastSnapshot !== undefined) options.onChallenge?.({ phase: 'cleared', ...snapshot, elapsedMs });
+        return elapsedMs;
+      }
+      waitingSince ??= Date.now();
+      const signature = JSON.stringify(snapshot);
+      if (signature !== lastSnapshot) {
+        options.onChallenge?.({ phase: 'waiting', ...snapshot, elapsedMs: Date.now() - waitingSince });
+        lastSnapshot = signature;
+      }
     }
     waitingSince ??= Date.now();
     const remaining = waitingSince + timeout - Date.now();
     if (remaining <= 0) {
-      if (notices === undefined) throw new Error('Page navigation did not settle. No retry will be attempted.');
+      if (!snapshot) throw new Error('Page navigation did not settle. No retry will be attempted.');
+      options.onChallenge?.({ phase: 'timed-out', ...snapshot, elapsedMs: Date.now() - waitingSince });
       throw new AccessBlockedError('Cloudflare challenge timed out. Stopping the batch.');
     }
     await setTimeout(Math.min(options.pollMs ?? 500, remaining), undefined, options.signal ? { signal: options.signal } : {});

@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import type { Page } from 'playwright';
 import { launchProfile } from '../src/browser/edge.ts';
 import { NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
-import { AccessBlockedError, assertAccess } from '../src/browser/account.ts';
+import { AccessBlockedError, assertAccess, type ChallengeEvent } from '../src/browser/account.ts';
 import { generateBatches, maxPrompts, type Prompt } from '../src/prompts/generate.ts';
 import { accountCheck, challengeFixture, featurePath, fixture } from './fixtures/chat.ts';
 
@@ -71,6 +71,29 @@ test('access checks repeat only a read interrupted by navigation', async () => {
   await assert.rejects(assertAccess(page, {}), /Target page, context or browser has been closed/);
 });
 
+test('a known challenge remains blocking if navigation interrupts page inspection', async () => {
+  const locator = {
+    or() { return this; }, filter() { return this; }, first() { return this; },
+    async evaluateAll() { return []; }, async isVisible() { return false; },
+  };
+  const page = {
+    isClosed: () => false, getByText: () => locator, locator: () => locator,
+    title: async () => { throw new Error('Execution context was destroyed during navigation'); },
+  } as unknown as Page;
+  const challenges: ChallengeEvent[] = [];
+  const account = { challenges: new Map([['/backend-api/me', { request: 'identity' as const, status: 403 }]]) };
+  await assert.rejects(assertAccess(page, account, {
+    pollMs: 1, challengeTimeoutMs: 5, onChallenge: event => challenges.push(event),
+  }), (error: unknown) => error instanceof AccessBlockedError && /Cloudflare challenge timed out/.test(error.message));
+  const timeout = challenges.find(event => event.phase === 'timed-out');
+  assert.ok(timeout && timeout.phase === 'timed-out');
+  assert.deepEqual(timeout.indicators, ['response', 'page-unavailable']);
+  assert.deepEqual(timeout.responses, [{ request: 'identity', status: 403 }]);
+  assert.doesNotMatch(JSON.stringify(challenges), /backend-api/);
+  await assert.rejects(assertAccess(page, {}, { pollMs: 1, challengeTimeoutMs: 5 }),
+    /Page navigation did not settle/);
+});
+
 test('chat flow uses only a disposable profile and a local HTTP fixture', async t => {
   const sent: string[] = [];
   let mode = 'normal';
@@ -81,16 +104,25 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   const failedRequests: string[] = [];
   const server = createServer(async (request, response) => {
     const failureStatus = failures.get(request.url ?? '');
-    if (mode.startsWith('challenge-') && request.url === '/') {
+    if (['challenge-navigation-stalled', 'blocked-navigation-stalled-403', 'blocked-navigation-stalled-429'].includes(mode) &&
+        request.url === '/') {
+      const status = mode.endsWith('429') ? 429 : 403;
+      response.writeHead(status, mode === 'challenge-navigation-stalled'
+        ? { 'content-type': 'text/html', 'cf-mitigated': 'challenge' } : { 'content-type': 'text/html' });
+      response.flushHeaders();
+    } else if (mode.startsWith('challenge-') && request.url === '/') {
       response.writeHead(403, { 'content-type': 'text/html', 'cf-mitigated': 'challenge' });
       response.end(challengeFixture(mode === 'challenge-stuck' ? undefined : mode === 'challenge-long' ? 61_000 : 600));
     } else if (failureStatus !== undefined) {
       failedRequests.push(request.url!);
       response.writeHead(failureStatus, { 'content-type': 'application/json' });
       response.end('{}');
+    } else if (request.url?.startsWith('/backend-api/sentinel/')) {
+      response.writeHead(403, { 'content-type': 'text/html', 'cf-mitigated': 'challenge' });
+      response.end(challengeFixture());
     } else if (request.url === '/backend-api/me') {
       identityRequests++;
-      if (['identity-challenge', 'multiple-challenges'].includes(mode) && identityRequests === 1) {
+      if (['identity-challenge', 'identity-stale', 'multiple-challenges'].includes(mode) && identityRequests === 1) {
         response.writeHead(403, { 'content-type': 'text/html', 'cf-mitigated': 'challenge' });
         response.end(challengeFixture());
         return;
@@ -414,13 +446,22 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       for (const value of ['challenge-clears', 'identity-challenge', 'plan-challenge', 'multiple-challenges']) {
         mode = value; sent.length = 0; identityRequests = 0; planRequests = 0;
         const events: string[] = [];
+        const challenges: ChallengeEvent[] = [];
         await runChat(page, [prompt], {
           ...options, readyTimeoutMs: 350, onEvent: event => events.push(event),
+          onChallenge: event => challenges.push(event),
         });
         assert.deepEqual(sent, [prompt.text], value);
         assert.deepEqual(events, ['sending', 'sent', 'completed'], value);
         assert.equal(identityRequests, ['identity-challenge', 'multiple-challenges'].includes(value) ? 2 : 1, value);
         assert.equal(planRequests, ['plan-challenge', 'multiple-challenges'].includes(value) ? 2 : 1, value);
+        const responses = challenges.filter(event => event.phase === 'response').map(event => event.response.request).sort();
+        const expected = value === 'challenge-clears' ? ['document'] : value === 'identity-challenge' ? ['identity']
+          : value === 'plan-challenge' ? ['plan'] : ['identity', 'plan'];
+        assert.deepEqual(responses, expected, value);
+        assert.ok(challenges.some(event => event.phase === 'waiting' && event.indicators.includes('response')), value);
+        assert.ok(challenges.some(event => event.phase === 'cleared' && event.elapsedMs > 0), value);
+        assert.doesNotMatch(JSON.stringify(challenges), /fixture@example|timezone_offset|Verify you are human/);
       }
     });
     await t.test('the default Cloudflare grace period survives a real one-minute challenge', async () => {
@@ -433,10 +474,11 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
     await t.test('visible challenges wait before sending without interacting with verification controls', async () => {
       for (const value of ['title', 'body', 'iframe']) {
         mode = 'normal'; sent.length = 0;
+        const challenges: ChallengeEvent[] = [];
         await page.route('https://challenges.cloudflare.com/**', route => route.fulfill({ body: '' }));
         try {
           await runChat(page, [prompt], {
-            ...options, beforeSend: async () => {
+            ...options, onChallenge: event => challenges.push(event), beforeSend: async () => {
               await page.evaluate(value => {
                 const marker = document.createElement(value === 'iframe' ? 'iframe' : 'p');
                 if (value === 'title') document.title = 'Just a moment...';
@@ -449,6 +491,12 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
             },
           });
           assert.deepEqual(sent, [prompt.text], value);
+          assert.deepEqual(challenges.map(event => event.phase), ['waiting', 'cleared']);
+          const waiting = challenges.find(event => event.phase === 'waiting');
+          assert.ok(waiting && waiting.phase === 'waiting');
+          assert.deepEqual(waiting.indicators, [value === 'body' ? 'text' : value]);
+          assert.equal(waiting.stage, 'submission');
+          assert.deepEqual(waiting.responses, []);
         } finally {
           await page.unroute('https://challenges.cloudflare.com/**');
         }
@@ -493,11 +541,80 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
     await t.test('unresolved Cloudflare challenges time out without filling or submitting', async () => {
       mode = 'challenge-stuck'; sent.length = 0;
       const events: string[] = [];
+      const challenges: ChallengeEvent[] = [];
       await assert.rejects(runChat(page, [prompt, prompt], {
         ...options, challengeTimeoutMs: 150, onEvent: event => events.push(event),
+        onChallenge: event => challenges.push(event),
       }), (error: unknown) => error instanceof AccessBlockedError && /Cloudflare challenge timed out/.test(error.message));
       assert.deepEqual(sent, []);
       assert.deepEqual(events, []);
+      assert.deepEqual(challenges.map(event => event.phase), ['response', 'waiting', 'timed-out']);
+      const response = challenges[0];
+      assert.ok(response && response.phase === 'response');
+      assert.deepEqual(response.response, { request: 'document', status: 403 });
+      assert.equal(response.stage, 'navigation');
+      const timeout = challenges.at(-1);
+      assert.ok(timeout && timeout.phase === 'timed-out');
+      assert.deepEqual(timeout.indicators, ['response', 'text', 'title']);
+      assert.deepEqual(timeout.responses, [{ request: 'document', status: 403 }]);
+      assert.equal(timeout.stage, 'readiness');
+      assert.ok(timeout.elapsedMs >= 150);
+    });
+
+    await t.test('an access-blocked navigation that never finishes still stops the batch', async () => {
+      for (const value of ['challenge-navigation-stalled', 'blocked-navigation-stalled-403', 'blocked-navigation-stalled-429']) {
+        mode = value; sent.length = 0;
+        const challenges: ChallengeEvent[] = [];
+        try {
+          await assert.rejects(runChat(page, [prompt], {
+            ...options, readyTimeoutMs: 350, onChallenge: event => challenges.push(event),
+          }), (error: unknown) => error instanceof AccessBlockedError &&
+            (value.startsWith('challenge') ? /challenge prevented navigation/i : new RegExp(`HTTP ${value.slice(-3)} /`))
+              .test(error.message));
+          if (value.startsWith('challenge')) {
+            const response = challenges.find(event => event.phase === 'response');
+            assert.ok(response && response.phase === 'response');
+            assert.deepEqual(response.response, { request: 'document', status: 403 });
+            assert.equal(response.stage, 'navigation');
+          } else {
+            assert.deepEqual(challenges, []);
+          }
+          assert.deepEqual(sent, []);
+        } finally {
+          await page.goto('about:blank');
+        }
+      }
+    });
+
+    await t.test('a response-only challenge stays conservative and is distinguished from a visible challenge', async () => {
+      mode = 'identity-stale'; sent.length = 0; identityRequests = 0; planRequests = 0;
+      const challenges: ChallengeEvent[] = [];
+      await assert.rejects(runChat(page, [prompt], {
+        ...options, challengeTimeoutMs: 150, onChallenge: event => challenges.push(event),
+      }), (error: unknown) => error instanceof AccessBlockedError && /Cloudflare challenge timed out/.test(error.message));
+      const timeout = challenges.find(event => event.phase === 'timed-out');
+      assert.ok(timeout && timeout.phase === 'timed-out');
+      assert.deepEqual(timeout.indicators, ['response']);
+      assert.deepEqual(timeout.responses, [{ request: 'identity', status: 403 }]);
+      assert.equal(identityRequests, 1);
+      assert.deepEqual(sent, []);
+    });
+
+    await t.test('sentinel challenge diagnostics contain categories, never private paths or query parameters', async () => {
+      mode = 'normal'; sent.length = 0;
+      const challenges: ChallengeEvent[] = [];
+      await assert.rejects(runChat(page, [prompt], {
+        ...options, challengeTimeoutMs: 150, onChallenge: event => challenges.push(event),
+        beforeSend: async () => {
+          await page.evaluate(async () => { await fetch('/backend-api/sentinel/PRIVATE-PATH?token=PRIVATE-QUERY'); });
+        },
+      }), (error: unknown) => error instanceof AccessBlockedError && /Cloudflare challenge timed out/.test(error.message));
+      const response = challenges.find(event => event.phase === 'response');
+      assert.ok(response && response.phase === 'response');
+      assert.deepEqual(response.response, { request: 'sentinel', status: 403 });
+      assert.equal(response.stage, 'submission');
+      assert.doesNotMatch(JSON.stringify(challenges), /PRIVATE|token|sentinel\//);
+      assert.deepEqual(sent, []);
     });
     await t.test('batch cancellation interrupts the Cloudflare grace period promptly', async () => {
       mode = 'challenge-stuck'; sent.length = 0;
@@ -518,11 +635,17 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
     await t.test('a challenged submission is never resent', async () => {
       mode = 'submission-challenge'; sent.length = 0;
       const events: string[] = [];
+      const challenges: ChallengeEvent[] = [];
       await assert.rejects(runChat(page, [prompt, prompt], {
         ...options, challengeTimeoutMs: 150, onEvent: event => events.push(event),
+        onChallenge: event => challenges.push(event),
       }), AccessBlockedError);
       assert.deepEqual(sent, [prompt.text]);
       assert.deepEqual(events, ['sending']);
+      const response = challenges.find(event => event.phase === 'response');
+      assert.ok(response && response.phase === 'response');
+      assert.deepEqual(response.response, { request: 'conversation', status: 403 });
+      assert.equal(response.stage, 'submission');
     });
     await t.test('403 and 429 main documents still stop before submission', async () => {
       try {

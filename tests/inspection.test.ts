@@ -99,7 +99,12 @@ test('real Edge inspection observes native responses, redacts credentials, persi
     requests++;
     assert.equal(request.method, 'GET');
     response.setHeader('content-type', 'application/json');
-    if (mode.startsWith('challenge') && request.url === '/') {
+    if (['challenge-disconnected', 'blocked-disconnected'].includes(mode) && request.url === '/') {
+      response.writeHead(403, mode === 'challenge-disconnected'
+        ? { 'content-type': 'text/html', 'cf-mitigated': 'challenge' } : { 'content-type': 'text/html' });
+      response.flushHeaders();
+      setTimeout(() => response.destroy(), 150);
+    } else if (mode.startsWith('challenge') && request.url === '/') {
       response.writeHead(403, { 'content-type': 'text/html', 'cf-mitigated': 'challenge' });
       response.end(challengeFixture(mode === 'challenge-stuck' ? undefined : 600));
     } else if (request.url === '/backend-api/me') {
@@ -142,6 +147,15 @@ test('real Edge inspection observes native responses, redacts credentials, persi
     assert.match((await inspectProfile(unresolved, { url, challengeTimeoutMs: 150, pollMs: 20 })).reason, /access_blocked/);
     const challengeCooldown = JSON.parse(readFileSync(join(unresolved.path, '.gpt-usage-access.json'), 'utf8'));
     assert.ok(Date.parse(challengeCooldown.next_allowed_at) >= challengedAt + 30 * 60_000);
+    for (const value of ['challenge-disconnected', 'blocked-disconnected']) {
+      mode = value;
+      const disconnected = createProfile(join(temporary, 'profiles'));
+      const disconnectedAt = Date.now();
+      const result = await inspectProfile(disconnected, { url });
+      assert.match(result.reason, value.startsWith('challenge') ? /access_blocked/ : /http_403/);
+      const access = JSON.parse(readFileSync(join(disconnected.path, '.gpt-usage-access.json'), 'utf8'));
+      assert.ok(Date.parse(access.next_allowed_at) >= disconnectedAt + 30 * 60_000);
+    }
     mode = 'blocked';
     const blocked = createProfile(join(temporary, 'profiles'));
     const blockedAt = Date.now();

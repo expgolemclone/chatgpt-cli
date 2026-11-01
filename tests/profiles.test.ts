@@ -123,7 +123,22 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
         assert.deepEqual(profilesFor('profile-skipped'), scenario.skipped);
         assert.equal(records.filter(record => record.event === 'batch-stopped').length, scenario.status);
         const stopped = records.findIndex(record => record.event === 'batch-stopped');
-        if (stopped >= 0) assert.equal(records.slice(stopped).some(record => record.event === 'fixture-submitted'), false);
+        if (stopped >= 0) {
+          assert.equal(records[stopped].profile, scenario.names[0]);
+          assert.equal(records.slice(stopped).some(record => record.event === 'fixture-submitted'), false);
+        }
+        if (scenario.names.includes('challenge')) {
+          const diagnostics = records.filter(record => record.event === 'challenge' && record.profile === 'challenge');
+          assert.ok(diagnostics.some(record => record.phase === 'response' && record.stage === 'navigation' &&
+            record.response.request === 'document' && record.response.status === 403));
+          assert.ok(diagnostics.some(record => record.phase === 'waiting' &&
+            record.indicators.includes('response') && record.indicators.includes('text')));
+          const cleared = records.findIndex(record => record.event === 'challenge' &&
+            record.profile === 'challenge' && record.phase === 'cleared');
+          const submitted = records.findIndex(record => record.event === 'fixture-submitted' && record.profile === 'challenge');
+          assert.ok(cleared >= 0 && submitted > cleared);
+          assert.doesNotMatch(JSON.stringify(diagnostics), /fixture@example|Verify you are human|challenge=cleared/);
+        }
         if (scenario.names.includes('free-a')) {
           const submissions = records.filter(record => record.event === 'sending');
           assert.equal(new Set(submissions.slice(0, 2).map(record => record.profile)).size, 2);
