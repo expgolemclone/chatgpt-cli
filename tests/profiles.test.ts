@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { challengeFixture, featurePath, fixture } from './fixtures/chat.ts';
 
-test('parallel minimized profiles skip paid accounts, finish five rallies, and stop together on access blocks', async t => {
+test('sequential minimized profiles skip paid accounts, finish five rallies, and stop on access blocks', async t => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-profiles-test-');
   try {
     const preload = join(temporary, 'fixture.mjs');
@@ -17,9 +17,6 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
       import { setTimeout } from 'node:timers/promises';
       import { chromium } from ${JSON.stringify(import.meta.resolve('playwright'))};
       const connect = chromium.connectOverCDP.bind(chromium);
-      let opened = 0;
-      let release;
-      const allOpened = new Promise(resolve => { release = resolve; });
       chromium.connectOverCDP = async (endpoint, options) => {
         const port = new URL(endpoint).port;
         const directory = process.argv.filter((value,index) => process.argv[index-1] === '--profile')
@@ -31,6 +28,21 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
         const context = browser.contexts()[0];
         const session = await context.newCDPSession(context.pages()[0]);
         await assert.rejects(session.send('Browser.getBrowserCommandLine'), /--enable-automation.*not set/);
+        await session.detach();
+        const newPageSession = context.newCDPSession.bind(context);
+        context.newCDPSession = async (...args) => {
+          const pageSession = await newPageSession(...args);
+          const send = pageSession.send.bind(pageSession);
+          pageSession.send = async (...command) => {
+            const result = await send(...command);
+            if (command[0] === 'Browser.setWindowBounds') {
+              assert.equal(command[1].bounds.windowState, 'minimized');
+              console.log(JSON.stringify({ event: 'fixture-window-minimized', profile: name }));
+            }
+            return result;
+          };
+          return pageSession;
+        };
         await context.route('**/*', async route => {
           try {
             const target = new URL(route.request().url());
@@ -49,23 +61,19 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
               return await route.fulfill({ status: name === 'feature-limited' ? 429 : 403, json: {} });
             }
             if (target.pathname === '/backend-api/f/conversation') {
-              const { bounds } = await session.send('Browser.getWindowForTarget');
-              assert.equal(bounds.windowState, 'minimized');
               console.log(JSON.stringify({ event: 'fixture-submitted', profile: name, time: Date.now() }));
               if (name === 'delayed-blocked') await setTimeout(1500);
               return await route.fulfill({ status: name === 'submission-blocked' ? 403
                 : ['submission-limited', 'delayed-blocked'].includes(name) ? 429 : 200, body: 'ok' });
             }
             if (route.request().isNavigationRequest()) {
-              await allOpened;
-              const { bounds } = await session.send('Browser.getWindowForTarget');
-              assert.equal(bounds.windowState, 'minimized');
               if (!target.search) console.log(JSON.stringify({ event: 'fixture-navigated', profile: name }));
               if (name === 'challenge' && !target.search) return await route.fulfill({ status: 403,
                 headers: { 'cf-mitigated': 'challenge' }, contentType: 'text/html',
                 body: ${JSON.stringify(challengeFixture(750))} });
               return await route.fulfill({ status: name === 'blocked' ? 403 : 200,
-                contentType: 'text/html; charset=utf-8', body: ${JSON.stringify(fixture('feature-failure'))} });
+                contentType: 'text/html; charset=utf-8', body: name === 'login'
+                  ? ${JSON.stringify(fixture('login'))} : ${JSON.stringify(fixture('feature-failure'))} });
             }
             return await route.abort();
           } catch (error) {
@@ -73,8 +81,20 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
           }
         });
         context.on('close', () => console.log(JSON.stringify({ event: 'fixture-profile-closed', profile: name })));
+        if (name === 'cleanup-error') {
+          const newSession = browser.newBrowserCDPSession.bind(browser);
+          browser.newBrowserCDPSession = async () => {
+            const closeSession = await newSession();
+            const send = closeSession.send.bind(closeSession);
+            closeSession.send = async (...args) => {
+              const result = await send(...args);
+              if (args[0] === 'Browser.close') throw new Error('Fixture close failure');
+              return result;
+            };
+            return closeSession;
+          };
+        }
         console.log(JSON.stringify({ event: 'fixture-profile-opened', profile: name }));
-        if (++opened === Number(process.env.FIXTURE_PROFILE_COUNT)) release();
         return browser;
       };
     `);
@@ -84,10 +104,12 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
       { names: ['paid'], count: 1, status: 0, submitted: [], skipped: ['paid'] },
       { names: ['challenge', 'free'], count: 1, status: 0, submitted: ['challenge', 'free'], skipped: [] },
       { names: ['feature-limited'], count: 1, status: 0, submitted: ['feature-limited'], skipped: [] },
-      { names: ['blocked', 'waiting'], count: 1, status: 1, submitted: [], skipped: [] },
-      { names: ['submission-blocked', 'waiting'], count: 1, status: 1, submitted: ['submission-blocked'], skipped: [] },
-      { names: ['submission-limited', 'waiting'], count: 1, status: 1, submitted: ['submission-limited'], skipped: [] },
-      { names: ['delayed-blocked', 'free'], count: 2, status: 1, submitted: ['delayed-blocked', 'free'], skipped: [] },
+      { names: ['login', 'free'], count: 1, status: 1, submitted: ['free'], skipped: [], failed: 'login' },
+      { names: ['cleanup-error', 'free'], count: 1, status: 1, submitted: ['cleanup-error'], skipped: [], stopped: true },
+      { names: ['blocked', 'waiting'], count: 1, status: 1, submitted: [], skipped: [], stopped: true },
+      { names: ['submission-blocked', 'waiting'], count: 1, status: 1, submitted: ['submission-blocked'], skipped: [], stopped: true },
+      { names: ['submission-limited', 'waiting'], count: 1, status: 1, submitted: ['submission-limited'], skipped: [], stopped: true },
+      { names: ['delayed-blocked', 'free'], count: 2, status: 1, submitted: ['delayed-blocked'], skipped: [], stopped: true },
       { names: ['free-a', 'free-b', 'paid'], count: undefined, status: 0,
         submitted: ['free-a', 'free-b'].flatMap(name => Array<string>(5).fill(name)), skipped: ['paid'] },
     ];
@@ -103,25 +125,28 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
         const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, 'send',
           ...profiles.flatMap(profile => ['--profile', profile.path]),
           ...(scenario.count === undefined ? [] : ['--questions', String(scenario.count)]), '--seed', 'fixture'], {
-          encoding: 'utf8', timeout: scenario.count === undefined ? 160_000 : scenario.status ? 20_000 : 55_000,
-          env: { ...process.env, LOCALAPPDATA: localAppData, FIXTURE_PROFILE_COUNT: String(profiles.length) },
+          encoding: 'utf8', timeout: scenario.count === undefined ? 330_000 : scenario.status ? 25_000 : 55_000,
+          env: { ...process.env, LOCALAPPDATA: localAppData },
         });
         assert.equal(result.error, undefined, result.stdout + result.stderr);
         assert.equal(result.status, scenario.status, result.stdout + result.stderr);
         const records = result.stdout.trim().split('\n').map(line => JSON.parse(line));
         const profilesFor = (event: string) => records.filter(record => record.event === event).map(record => record.profile).sort();
         assert.deepEqual(profilesFor('fixture-submitted'), scenario.submitted, result.stdout + result.stderr);
-        assert.deepEqual(profilesFor('fixture-profile-opened'), [...scenario.names].sort(), result.stdout + result.stderr);
-        assert.deepEqual(profilesFor('fixture-profile-closed'), [...scenario.names].sort(), result.stdout + result.stderr);
-        const navigated = profilesFor('fixture-navigated');
-        if (scenario.status === 0) {
-          assert.deepEqual(navigated, [...scenario.names].sort());
-        } else {
-          assert.ok(navigated.includes(scenario.names[0]));
-          assert.ok(navigated.every(profile => scenario.names.includes(profile)));
+        const launched = scenario.stopped ? scenario.names.slice(0, 1) : scenario.names;
+        const lifecycle = records.filter(record => ['fixture-profile-opened', 'fixture-profile-closed'].includes(record.event))
+          .map(record => `${record.event}:${record.profile}`);
+        assert.deepEqual(lifecycle, launched.flatMap(name => [`fixture-profile-opened:${name}`, `fixture-profile-closed:${name}`]));
+        assert.deepEqual(profilesFor('fixture-window-minimized'), [...launched].sort());
+        assert.deepEqual(profilesFor('fixture-navigated'), [...launched].sort());
+        for (const name of launched) {
+          const minimized = records.findIndex(record => record.event === 'fixture-window-minimized' && record.profile === name);
+          const navigated = records.findIndex(record => record.event === 'fixture-navigated' && record.profile === name);
+          assert.ok(minimized >= 0 && minimized < navigated);
         }
         assert.deepEqual(profilesFor('profile-skipped'), scenario.skipped);
-        assert.equal(records.filter(record => record.event === 'batch-stopped').length, scenario.status);
+        assert.deepEqual(profilesFor('profile-failed'), scenario.status ? [scenario.failed ?? scenario.names[0]] : []);
+        assert.equal(records.filter(record => record.event === 'batch-stopped').length, scenario.stopped ? 1 : 0);
         const stopped = records.findIndex(record => record.event === 'batch-stopped');
         if (stopped >= 0) {
           assert.equal(records[stopped].profile, scenario.names[0]);
@@ -141,15 +166,12 @@ test('parallel minimized profiles skip paid accounts, finish five rallies, and s
         }
         if (scenario.names.includes('free-a')) {
           const submissions = records.filter(record => record.event === 'sending');
-          assert.equal(new Set(submissions.slice(0, 2).map(record => record.profile)).size, 2);
-          for (const name of ['free-a', 'free-b']) {
-            const times = submissions.filter(record => record.profile === name).map(record => Date.parse(record.time));
-            assert.equal(times.length, 5);
-            for (let index = 1; index < times.length; index++) {
-              assert.ok(times[index]! - times[index - 1]! >= 29_900, JSON.stringify(times));
-            }
+          assert.deepEqual(submissions.map(record => record.profile),
+            ['free-a', 'free-b'].flatMap(name => Array<string>(5).fill(name)));
+          const times = submissions.map(record => Date.parse(record.time));
+          for (let index = 1; index < times.length; index++) {
+            assert.ok(times[index]! - times[index - 1]! >= 29_900, JSON.stringify(times));
           }
-          assert.ok(Math.abs(Date.parse(submissions[0].time) - Date.parse(submissions[1].time)) < 10_000);
           assert.equal(records.filter(record => record.event === 'completed').length, 10);
         }
         assert.equal(records.at(-1).event, 'finished');

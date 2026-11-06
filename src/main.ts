@@ -27,7 +27,8 @@ Usage: node src/main.ts <login|open|profiles|inspect|sync|send> [options]
                      Requires --ledger. Uses the selected profile or collection.
                      Keeps other ledger rows and never sends prompts.
   send               Terminate selected profiles' running Edge processes, then send
-                     locally generated prompts to signed-in free accounts.
+                     locally generated prompts to signed-in free accounts, one profile
+                     at a time with at least 30 seconds between submissions.
 
   --profile PATH     Absolute dedicated user-data directory. Repeat for open/send.
   --profile-root PATH  Collection of marked profiles, excluding archive.
@@ -133,55 +134,59 @@ async function main(): Promise<void> {
   for (const { profile, pid } of await terminateProfiles(profiles)) {
     log('profile-terminated', { profile: profile.name, pid });
   }
-  const stop = new AbortController();
-  const results = await Promise.allSettled(batches.map(async ({ profile, prompts }) => {
-    let edge: Awaited<ReturnType<typeof launchProfile>> | undefined;
-    let lastSend = 0;
-    try {
-      stop.signal.throwIfAborted();
-      edge = await launchProfile(profile);
-      const page = edge.context.pages()[0];
-      if (!page) throw new Error('Edge did not create its initial tab.');
-      const session = await edge.context.newCDPSession(page);
-      try {
-        const { windowId } = await session.send('Browser.getWindowForTarget');
-        await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
-      } finally {
-        await session.detach();
-      }
-      await runChat(page, prompts, {
-        signal: stop.signal,
-        beforeSend: async () => {
-          const delay = Math.max(0, lastSend + 30_000 - Date.now());
-          if (delay) await setTimeout(delay, undefined, { signal: stop.signal });
-          stop.signal.throwIfAborted();
-        },
-        onEvent: (event, prompt) => {
-          if (event === 'sending') lastSend = Date.now();
-          log(event, { profile: profile.name, promptId: prompt.id, url: page.url() });
-        },
-        onChallenge: event => log('challenge', { profile: profile.name, ...event }),
-      });
-    } catch (error) {
-      if (error instanceof AccessBlockedError && !stop.signal.aborted) {
-        log('batch-stopped', { profile: profile.name, reason: 'Access blocked; stopping further submissions in every profile.' });
-        stop.abort(new Error('Batch stopped because another profile encountered an access block.'));
-      }
-      throw error;
-    } finally {
-      await edge?.close();
-    }
-  }));
   let failed = false;
-  for (const [index, result] of results.entries()) {
-    const profile = batches[index]!.profile.name;
-    if (result.status === 'fulfilled') {
-      log('profile-completed', { profile });
-    } else if (result.reason instanceof NonFreeAccountError) {
-      log('profile-skipped', { profile, reason: 'non-free-account' });
-    } else {
-      failed = true;
-      log('profile-failed', { profile, error: String(result.reason) });
+  let lastSend = 0;
+  for (const { profile, prompts } of batches) {
+    let stopBatch = true;
+    try {
+      const edge = await launchProfile(profile);
+      stopBatch = false;
+      try {
+        const page = edge.context.pages()[0];
+        if (!page) throw new Error('Edge did not create its initial tab.');
+        const session = await edge.context.newCDPSession(page);
+        try {
+          const { windowId } = await session.send('Browser.getWindowForTarget');
+          await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+        } finally {
+          await session.detach();
+        }
+        await runChat(page, prompts, {
+          beforeSend: async () => {
+            const delay = Math.max(0, lastSend + 30_000 - Date.now());
+            if (delay) await setTimeout(delay);
+          },
+          onEvent: (event, prompt) => {
+            if (event === 'sending') lastSend = Date.now();
+            log(event, { profile: profile.name, promptId: prompt.id, url: page.url() });
+          },
+          onChallenge: event => log('challenge', { profile: profile.name, ...event }),
+        });
+      } catch (error) {
+        if (error instanceof AccessBlockedError) stopBatch = true;
+        throw error;
+      } finally {
+        try {
+          await edge.close();
+        } catch (error) {
+          stopBatch = true;
+          throw error;
+        }
+      }
+      log('profile-completed', { profile: profile.name });
+    } catch (error) {
+      if (error instanceof NonFreeAccountError && !stopBatch) {
+        log('profile-skipped', { profile: profile.name, reason: 'non-free-account' });
+      } else {
+        failed = true;
+        if (stopBatch) {
+          log('batch-stopped', { profile: profile.name, reason: error instanceof AccessBlockedError
+            ? 'Access blocked; stopping further submissions in every profile.'
+            : 'The browser could not be started or closed safely; stopping further profiles.' });
+        }
+        log('profile-failed', { profile: profile.name, error: String(error) });
+        if (stopBatch) break;
+      }
     }
   }
   log('finished', { success: !failed });
