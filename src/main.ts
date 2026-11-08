@@ -46,7 +46,7 @@ may be lost. Other commands never terminate existing browser windows. Cloudflare
 challenges wait up to 2 minutes for automatic completion. HTTP blocks, usage limits,
 and unresolved challenges stop the batch. Uncertain submissions are never retried.
 Prompt selection reads previous sending events from the local logs. Simultaneous
-send commands can overlap, and removing logs removes their prompt history.
+send commands are rejected, and removing logs removes their prompt history.
 This tool does not create accounts or upgrade their plans.
 `;
 
@@ -75,6 +75,10 @@ async function main(): Promise<void> {
   }
   if (command === 'inspect' && (values['profile-root'] !== undefined || values.profile?.length !== 1)) {
     throw new Error('inspect requires exactly one --profile.');
+  }
+  if (command === 'send' && !values['dry-run']) {
+    const { acquireSendLock } = await import('./send-lock.ts');
+    process.once('exit', acquireSendLock());
   }
   const root = values.profile === undefined
     ? values['profile-root'] ?? join(process.env.LOCALAPPDATA!, 'chatgpt-cli', 'profiles') : undefined;
