@@ -43,8 +43,9 @@ Usage: node src/main.ts <login|open|profiles|inspect|sync|send> [options]
 Requires Windows, Node.js, and Microsoft Edge. No PowerShell 7 or other project
 is needed. Send force-closes only selected dedicated Edge profiles; unsaved drafts
 may be lost. Other commands never terminate existing browser windows. Cloudflare
-challenges wait up to 2 minutes for automatic completion. HTTP blocks, usage limits,
-and unresolved challenges stop the batch. Uncertain submissions are never retried.
+challenges try a visible verification checkbox once and wait up to 2 minutes.
+Cloudflare may reject automated browsers. HTTP blocks, usage limits, and unresolved
+challenges stop the batch. Uncertain submissions are never retried.
 Prompt selection reads previous sending events from the local logs. Simultaneous
 send commands are rejected, and removing logs removes their prompt history.
 This tool does not create accounts or upgrade their plans.

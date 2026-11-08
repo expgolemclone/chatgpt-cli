@@ -63,7 +63,7 @@ test('access checks repeat only a read interrupted by navigation', async () => {
     async isVisible() { return false; },
   };
   const page = {
-    isClosed: () => false, getByText: () => locator, locator: () => locator, title: async () => 'ChatGPT',
+    isClosed: () => false, getByText: () => locator, locator: () => locator, frames: () => [], title: async () => 'ChatGPT',
   } as unknown as Page;
   await assertAccess(page, {}, { pollMs: 1, challengeTimeoutMs: 1000 });
   assert.equal(reads, 2);
@@ -471,7 +471,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       assert.ok(Date.now() - started >= 61_000);
       assert.deepEqual(sent, [prompt.text]);
     });
-    await t.test('visible challenges wait before sending without interacting with verification controls', async () => {
+    await t.test('visible challenges without a checkbox wait before sending', async () => {
       for (const value of ['title', 'body', 'iframe']) {
         mode = 'normal'; sent.length = 0;
         const challenges: ChallengeEvent[] = [];
@@ -500,6 +500,43 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         } finally {
           await page.unroute('https://challenges.cloudflare.com/**');
         }
+      }
+    });
+    await t.test('an interactive challenge is pressed before sending exactly once', async () => {
+      mode = 'normal'; sent.length = 0;
+      const events: string[] = [];
+      await page.route('https://challenges.cloudflare.com/**', route => route.fulfill({
+        contentType: 'text/html', body: `<!doctype html><body><script>
+          const root = document.body.attachShadow({ mode: 'closed' });
+          root.innerHTML = '<label><input type="checkbox">Verify</label>';
+          root.querySelector('input').addEventListener('click', () => parent.postMessage('verified', '*'));
+        </script></body>`,
+      }));
+      try {
+        await runChat(page, [prompt], {
+          ...options, onEvent: event => events.push(event), beforeSend: async () => {
+            await page.evaluate(() => {
+              document.title = 'Just a moment...';
+              const host = document.createElement('div');
+              const frame = document.createElement('iframe');
+              frame.src = 'https://challenges.cloudflare.com/fixture';
+              host.attachShadow({ mode: 'closed' }).append(frame);
+              document.body.append(host);
+              window.addEventListener('message', event => {
+                if (event.origin === 'https://challenges.cloudflare.com' && event.data === 'verified') {
+                  document.body.dataset.challengeClicks = String(Number(document.body.dataset.challengeClicks ?? 0) + 1);
+                  document.title = 'Local chat fixture';
+                  host.remove();
+                }
+              });
+            });
+          },
+        });
+        assert.equal(await page.locator('body').getAttribute('data-challenge-clicks'), '1');
+        assert.deepEqual(sent, [prompt.text]);
+        assert.deepEqual(events, ['sending', 'sent', 'completed']);
+      } finally {
+        await page.unroute('https://challenges.cloudflare.com/**');
       }
     });
     await t.test('Cloudflare waiting pauses answer deadlines without resubmitting', async () => {
