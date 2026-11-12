@@ -84,12 +84,12 @@ test('inspection and send dry-run never terminate or unlock a busy browser', asy
     const page = edge.context.pages()[0]!;
     await page.goto('data:text/html,' + encodeURIComponent('<title>Keep existing browser</title>'));
     const run = (command: string) => spawnSync(process.execPath, [cli, command, '--profile', profile.path,
-      ...(command === 'send' ? ['--questions', '1', '--dry-run'] : [])], {
+      ...(command === 'send' ? ['--dry-run'] : [])], {
       encoding: 'utf8', timeout: 25_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
     });
     const sent = run('send');
     assert.equal(sent.status, 0, sent.stdout + sent.stderr);
-    assert.equal(JSON.parse(sent.stdout).profiles[0].prompts.length, 1);
+    assert.deepEqual(JSON.parse(sent.stdout).profiles[0].sessions.map((session: unknown[]) => session.length), [5, 5, 5, 5, 5]);
     const inspected = run('inspect');
     assert.equal(inspected.status, 0, inspected.stdout + inspected.stderr);
     assert.equal(JSON.parse(inspected.stdout).status, 'unknown');

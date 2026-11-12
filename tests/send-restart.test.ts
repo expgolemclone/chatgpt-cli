@@ -11,6 +11,7 @@ import { launchProfile } from '../src/browser/edge.ts';
 import { createProfile } from '../src/browser/profiles.ts';
 import { fixture } from './fixtures/chat.ts';
 import { closeWindow, manualPreload } from './fixtures/native-edge.ts';
+import { sendPacingFixture } from './fixtures/send-pacing.ts';
 
 const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const execute = promisify(execFile);
@@ -72,12 +73,13 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     const run = (...args: string[]) => execute(process.execPath, [cli, ...args], {
       encoding: 'utf8', timeout: 20_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
     });
-    const before = JSON.parse((await run('send', '--profile', selected.path, '--questions', '1',
+    const before = JSON.parse((await run('send', '--profile', selected.path,
       '--seed', 'restart-fixture', '--dry-run')).stdout);
-    await assert.rejects(run('send', '--profile', selected.path, '--questions', '0'), /Prompt count must be/);
+    await assert.rejects(run('send', '--profile', selected.path, '--questions', '5'), /Unknown option/);
     assert.doesNotThrow(() => process.kill(ordinaryPid!, 0), 'Read-only and invalid invocations never kill Edge.');
     const denied = join(temporary, 'deny-termination.mjs');
     writeFileSync(denied, `
+      import ${JSON.stringify(new URL('./fixtures/send-lock.mjs', import.meta.url).href)};
       import koffi from ${JSON.stringify(import.meta.resolve('koffi'))};
       const load = koffi.load;
       koffi.load = name => {
@@ -92,13 +94,14 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
       };
     `);
     await assert.rejects(execute(process.execPath, ['--import', pathToFileURL(denied).href,
-      cli, 'send', '--profile', selected.path, '--questions', '1'], {
+      cli, 'send', '--profile', selected.path], {
       encoding: 'utf8', timeout: 20_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
     }), /Cannot terminate the selected Edge profile/);
     assert.doesNotThrow(() => process.kill(ordinaryPid!, 0), 'A denied termination never launches automation.');
 
     const preload = join(temporary, 'offline-chat.mjs');
-    writeFileSync(preload, `
+    writeFileSync(preload, `${sendPacingFixture()}
+      import ${JSON.stringify(new URL('./fixtures/send-lock.mjs', import.meta.url).href)};
       import assert from 'node:assert/strict';
       import fs from 'node:fs';
       import { syncBuiltinESMExports } from 'node:module';
@@ -142,19 +145,22 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
       };
     `);
     const sent = await execute(process.execPath, ['--import', pathToFileURL(preload).href,
-      cli, 'send', '--profile', selected.path, '--questions', '1', '--seed', 'restart-fixture'], {
-      encoding: 'utf8', timeout: 45_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
+      cli, 'send', '--profile', selected.path, '--seed', 'restart-fixture'], {
+      encoding: 'utf8', timeout: 90_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
     });
     const records = sent.stdout.trim().split('\n').map(line => JSON.parse(line));
     assert.ok(records.some(record => record.event === 'profile-terminated' && record.pid === ordinaryPid));
     assert.equal(records.filter(record => record.event === 'fixture-endpoint-busy').length, 2);
-    assert.equal(records.filter(record => record.event === 'fixture-submitted').length, 1);
-    assert.equal(records.filter(record => record.event === 'sent').length, 1);
-    assert.equal(records.filter(record => record.event === 'completed').length, 1);
-    assert.equal(records.find(record => record.event === 'sending').promptId, before.profiles[0].prompts[0].id);
-    const after = JSON.parse((await run('send', '--profile', selected.path, '--questions', '1',
+    assert.equal(records.filter(record => record.event === 'fixture-submitted').length, 25);
+    assert.equal(records.filter(record => record.event === 'sent').length, 25);
+    assert.equal(records.filter(record => record.event === 'completed').length, 25);
+    assert.equal(records.filter(record => record.event === 'session-completed').length, 5);
+    assert.equal(records.filter(record => record.event === 'profile-completed').length, 1);
+    assert.deepEqual(records.filter(record => record.event === 'sending').map(record => record.promptId),
+      before.profiles[0].sessions.flat().map((prompt: { id: string }) => prompt.id));
+    const after = JSON.parse((await run('send', '--profile', selected.path,
       '--seed', 'restart-fixture', '--dry-run')).stdout);
-    assert.notEqual(after.profiles[0].prompts[0].id, before.profiles[0].prompts[0].id);
+    assert.notEqual(after.profiles[0].sessions[0][0].id, before.profiles[0].sessions[0][0].id);
     assert.equal(records.at(-1).success, true);
     assert.throws(() => process.kill(ordinaryPid!, 0), 'The pre-existing selected browser was terminated.');
     if (marked) assert.equal(readFileSync(join(selected.path, '.gpt-usage-id'), 'utf8'), created.id);

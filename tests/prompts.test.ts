@@ -51,7 +51,7 @@ test('selection preserves complete prompt bodies, code blocks, image commands, a
 test('profile batches are distinct and globally balanced before the catalog is exhausted', () => {
   const profiles = ['a', 'b', 'c', 'd', 'e'];
   for (let seed = 0; seed < 30; seed++) {
-    for (const count of [1, 2, 3, 5, 13, 30]) {
+    for (const count of [1, 2, 3, 5, 13, 25, 30]) {
       const batches = generateBatches(profiles, `seed-${seed}`, count);
       assert.equal(batches.length, profiles.length);
       const ids = batches.flat().map(prompt => prompt.id);
@@ -122,7 +122,21 @@ test('after exhaustion, category allocation also prefers the oldest available pr
   }
 });
 
-test('four full five-profile runs do not repeat the original catalog or each other', () => {
+test('five profiles receive 25 distinct prompts each, then history rotates after exhaustion', () => {
+  const profiles = ['a', 'b', 'c', 'd', 'e'];
+  const first = generateBatches(profiles, 'five-sessions', 25);
+  const history = new Map(first.flat().map(prompt => [prompt.id, 1]));
+  assert.equal(history.size, 125);
+  for (const batch of first) assert.equal(new Set(batch.map(prompt => prompt.id)).size, 25);
+  const next = generateBatches(profiles, 'five-sessions', 25, history);
+  const nextIds = new Set(next.flat().map(prompt => prompt.id));
+  assert.equal(nextIds.size, 125);
+  for (const prompt of catalog) {
+    if (!history.has(prompt.id)) assert.equal(nextIds.has(prompt.id), true, prompt.id);
+  }
+});
+
+test('four smaller five-profile selections do not repeat the original catalog or each other', () => {
   const history = new Map<string, number>();
   for (const kind of promptKinds) {
     for (const prompt of kind.prompts.slice(0, 10)) history.set(`${kind.id}-${prompt.id}`, 1);

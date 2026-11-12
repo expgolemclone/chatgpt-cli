@@ -8,13 +8,14 @@ import { fileURLToPath } from 'node:url';
 
 const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const lock = new URL('../src/send-lock.ts', import.meta.url).href;
+const preload = new URL('./fixtures/send-lock.mjs', import.meta.url).href;
 
 test('send is exclusive across processes and recovers when its owner is killed', async () => {
   const temporary = mkdtempSync('C:/dev/tmp/chatgpt-send-lock-');
   const localAppData = join(temporary, 'localappdata');
   const profile = join(temporary, 'profile');
   const env = { ...process.env, LOCALAPPDATA: localAppData };
-  const holder = spawn(process.execPath, ['--input-type=module', '-e', `
+  const holder = spawn(process.execPath, ['--import', preload, '--input-type=module', '-e', `
     import { acquireSendLock } from ${JSON.stringify(lock)};
     acquireSendLock();
     console.log('locked');
@@ -34,7 +35,7 @@ test('send is exclusive across processes and recovers when its owner is killed',
     ]);
     assert.equal(result, 'locked');
 
-    const send = spawnSync(process.execPath, [cli, 'send', '--profile', profile], {
+    const send = spawnSync(process.execPath, ['--import', preload, cli, 'send', '--profile', profile], {
       encoding: 'utf8', timeout: 10_000, env,
     });
     assert.equal(send.status, 1, send.stdout + send.stderr);
@@ -42,7 +43,7 @@ test('send is exclusive across processes and recovers when its owner is killed',
     assert.equal(existsSync(localAppData), false, 'a rejected send creates no state');
     assert.equal(existsSync(profile), false, 'a rejected send does not touch profiles');
 
-    const preview = spawnSync(process.execPath, [cli, 'send', '--profile', profile, '--dry-run'], {
+    const preview = spawnSync(process.execPath, ['--import', preload, cli, 'send', '--profile', profile, '--dry-run'], {
       encoding: 'utf8', timeout: 10_000, env,
     });
     assert.equal(preview.status, 0, preview.stdout + preview.stderr);
@@ -50,7 +51,7 @@ test('send is exclusive across processes and recovers when its owner is killed',
 
     assert.equal(holder.kill(), true);
     await once(holder, 'exit');
-    const successor = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    const successor = spawnSync(process.execPath, ['--import', preload, '--input-type=module', '-e', `
       import { acquireSendLock } from ${JSON.stringify(lock)};
       const release = acquireSendLock();
       release();

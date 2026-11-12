@@ -21,7 +21,7 @@ async function composerText(composer: Locator): Promise<string> {
       ? element.value : element instanceof HTMLElement ? element.innerText : element.textContent ?? '');
 }
 
-/** One conversation per profile. Submit each prompt once and wait for its completed answer. */
+/** Start one fresh conversation. Submit each prompt once and wait for its completed answer. */
 export async function runChat(page: Page, prompts: Prompt[], options: ChatOptions = {}): Promise<void> {
   const url = options.url ?? 'https://chatgpt.com/';
   const origin = new URL(url).origin;
