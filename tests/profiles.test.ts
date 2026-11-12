@@ -47,6 +47,7 @@ test('five round-robin loops finish five rounds per session, exclude failed acco
         visits.set(name, visit);
         const details = { profile: name, session: visit };
         let round = 0;
+        let challengeResponses = 0;
         const browser = await connect(endpoint, options);
         const context = browser.contexts()[0];
         const session = await context.newCDPSession(context.pages()[0]);
@@ -94,6 +95,12 @@ test('five round-robin loops finish five rounds per session, exclude failed acco
             }
             if (route.request().isNavigationRequest()) {
               if (!target.search) console.log(JSON.stringify({ event: 'fixture-navigated', ...details }));
+              const challengeLoop = name.startsWith('challenge-loop') || (name === 'late-challenge-loop' && visit === 2);
+              if (challengeLoop || (name === 'challenge-four' && challengeResponses < 4)) {
+                challengeResponses++;
+                return await route.fulfill({ status: 403, headers: { 'cf-mitigated': 'challenge' }, contentType: 'text/html',
+                  body: challengeResponses < 5 ? ${JSON.stringify(challengeFixture(150))} : ${JSON.stringify(challengeFixture())} });
+              }
               if (name === 'challenge' && !target.search) return await route.fulfill({ status: 403,
                 headers: { 'cf-mitigated': 'challenge' }, contentType: 'text/html',
                 body: ${JSON.stringify(challengeFixture(750))} });
@@ -110,7 +117,7 @@ test('five round-robin loops finish five rounds per session, exclude failed acco
           }
         });
         context.on('close', () => console.log(JSON.stringify({ event: 'fixture-profile-closed', ...details })));
-        if (name === 'cleanup-error' || (name === 'late-cleanup-error' && visit === 2)) {
+        if (['cleanup-error', 'challenge-loop-cleanup-error'].includes(name) || (name === 'late-cleanup-error' && visit === 2)) {
           const newSession = browser.newBrowserCDPSession.bind(browser);
           browser.newBrowserCDPSession = async () => {
             const closeSession = await newSession();
@@ -132,6 +139,14 @@ test('five round-robin loops finish five rounds per session, exclude failed acco
       { names: ['paid', 'free'], visits: ['paid:1', ...allVisits('free')], status: 0, skipped: ['paid:1'] },
       { names: ['paid'], visits: ['paid:1'], status: 0, skipped: ['paid:1'] },
       { names: ['challenge', 'free'], visits: allVisits('challenge', 'free'), status: 0 },
+      { names: ['challenge-loop', 'free'], visits: ['challenge-loop:1', ...allVisits('free')],
+        status: 0, skipped: ['challenge-loop:1'] },
+      { names: ['challenge-loop'], visits: ['challenge-loop:1'], status: 0, skipped: ['challenge-loop:1'] },
+      { names: ['challenge-four'], visits: allVisits('challenge-four'), status: 0 },
+      { names: ['late-challenge-loop', 'free'], visits: ['late-challenge-loop:1', 'free:1', 'late-challenge-loop:2', ...allVisits('free').slice(1)],
+        status: 0, skipped: ['late-challenge-loop:2'] },
+      { names: ['challenge-loop-cleanup-error', 'waiting'], visits: ['challenge-loop-cleanup-error:1'],
+        status: 1, failed: ['challenge-loop-cleanup-error:1'], stopped: true },
       { names: ['feature-limited'], visits: allVisits('feature-limited'), status: 0 },
       { names: ['login', 'free'], visits: ['login:1', ...allVisits('free')], status: 1, failed: ['login:1'] },
       { names: ['cleanup-error', 'free'], visits: ['cleanup-error:1'], status: 1, failed: ['cleanup-error:1'],
@@ -199,6 +214,20 @@ test('five round-robin loops finish five rounds per session, exclude failed acco
           assert.ok(minimized >= 0 && minimized < navigated);
         }
         assert.deepEqual(visitsFor('profile-skipped'), skipped);
+        for (const record of records.filter(record => record.event === 'profile-skipped' && record.profile.includes('challenge-loop'))) {
+          assert.equal(record.reason, 'cloudflare-challenge-limit');
+          const responses = records.filter(event => event.event === 'challenge' && event.phase === 'response' &&
+            visitOf(event) === visitOf(record));
+          assert.equal(responses.length, 5);
+          const closed = records.findIndex(event => event.event === 'fixture-profile-closed' && visitOf(event) === visitOf(record));
+          assert.ok(closed >= 0 && closed < records.indexOf(record), 'Close the skipped account before continuing.');
+        }
+        if (scenario.names.includes('challenge-four')) {
+          for (const visit of scenario.visits) {
+            assert.equal(records.filter(record => record.event === 'challenge' && record.phase === 'response' &&
+              visitOf(record) === visit).length, 4);
+          }
+        }
         assert.deepEqual(visitsFor('profile-failed'), failed);
         assert.deepEqual(visitsFor('session-completed'), completedVisits);
         assert.deepEqual(visitsFor('profile-completed'), completedVisits.filter(visit => visit.endsWith(':5')));

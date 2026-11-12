@@ -64,6 +64,7 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
     } catch (error) {
       options.signal?.throwIfAborted();
       if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`, { cause: error });
+      if (account.challengeLimit) throw account.challengeLimit;
       if (account.challenges?.size) {
         throw new AccessBlockedError('Cloudflare challenge prevented navigation. Stopping the batch.', { cause: error });
       }

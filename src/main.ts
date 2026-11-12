@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 import { NonFreeAccountError, runChat } from './chat.ts';
-import { AccessBlockedError } from './browser/account.ts';
+import { AccessBlockedError, ChallengeLimitError } from './browser/account.ts';
 import { launchProfile, openProfile } from './browser/edge.ts';
 import { inspectProfile } from './browser/inspect.ts';
 import { assertProfileDirectory, createProfile, listProfiles, resolveProfiles } from './browser/profiles.ts';
@@ -48,7 +48,8 @@ Requires Windows, Node.js, and Microsoft Edge. No PowerShell 7 or other project
 is needed. Send force-closes only selected dedicated Edge profiles; unsaved drafts
 may be lost. Other commands never terminate existing browser windows. Cloudflare
 challenges try a visible verification checkbox once and wait up to 2 minutes.
-Cloudflare may reject automated browsers. HTTP blocks, usage limits, and unresolved
+Five consecutive Cloudflare challenge responses skip that account for this run;
+the count resets when access clears. HTTP blocks, usage limits, and other unresolved
 challenges stop the batch. Uncertain submissions are never retried.
 Prompt selection reads previous sending events from the local logs. Simultaneous
 send commands are rejected, and removing logs removes their prompt history.
@@ -180,7 +181,7 @@ async function main(): Promise<void> {
             onChallenge: event => log('challenge', { ...details, ...event }),
           });
         } catch (error) {
-          if (error instanceof AccessBlockedError) stopBatch = true;
+          if (error instanceof AccessBlockedError && !(error instanceof ChallengeLimitError)) stopBatch = true;
           throw error;
         } finally {
           try {
@@ -194,8 +195,9 @@ async function main(): Promise<void> {
         if (session === sessionCount - 1) log('profile-completed', details);
       } catch (error) {
         batches.splice(batches.indexOf(batch), 1);
-        if (error instanceof NonFreeAccountError && !stopBatch) {
-          log('profile-skipped', { ...details, reason: 'non-free-account' });
+        if (!stopBatch && (error instanceof NonFreeAccountError || error instanceof ChallengeLimitError)) {
+          log('profile-skipped', { ...details, reason: error instanceof ChallengeLimitError
+            ? 'cloudflare-challenge-limit' : 'non-free-account' });
         } else {
           failed = true;
           if (stopBatch) {

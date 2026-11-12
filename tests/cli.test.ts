@@ -29,6 +29,8 @@ test('standalone CLI resolves its own dedicated profiles without another project
         assert.match(result.stdout, /Send force-closes only selected dedicated Edge profiles/);
         assert.match(result.stdout, /Other commands never terminate existing browser windows/);
         assert.match(result.stdout, /challenges try a visible verification checkbox once and wait up to 2 minutes/);
+        assert.match(result.stdout, /Five consecutive Cloudflare challenge responses skip that account for this run/);
+        assert.match(result.stdout, /count resets when access clears/);
         assert.match(result.stdout, /%LOCALAPPDATA%\/chatgpt-cli\/profiles/);
         assert.match(result.stdout, /accounts in order for 5 loops/);
         assert.match(result.stdout, /5 prompt\/answer rounds \(25 per account\)/);

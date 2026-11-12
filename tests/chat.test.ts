@@ -479,6 +479,9 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         try {
           await runChat(page, [prompt], {
             ...options, onChallenge: event => challenges.push(event), beforeSend: async () => {
+              const navigation = value === 'iframe' ? page.waitForEvent('framenavigated', {
+                predicate: frame => frame.url() === 'https://challenges.cloudflare.com/fixture',
+              }) : undefined;
               await page.evaluate(value => {
                 const marker = document.createElement(value === 'iframe' ? 'iframe' : 'p');
                 if (value === 'title') document.title = 'Just a moment...';
@@ -488,6 +491,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
                 document.body.append(marker);
                 setTimeout(() => { document.title = 'Local chat fixture'; marker.remove(); }, 600);
               }, value);
+              await navigation;
             },
           });
           assert.deepEqual(sent, [prompt.text], value);

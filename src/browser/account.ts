@@ -2,6 +2,7 @@ import { setTimeout } from 'node:timers/promises';
 import type { CDPSession, Frame, Page, Response } from 'playwright';
 
 export class AccessBlockedError extends Error {}
+export class ChallengeLimitError extends AccessBlockedError {}
 export const loginName = /^(Log in(?: or sign up)?|Sign in|ログイン(?:または新規登録)?)$/i;
 export const emailPattern = /^[^@\s]+@[^@\s]+$/;
 const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ/i;
@@ -39,6 +40,7 @@ export interface Account {
   identity?: Identity; plan?: Plan;
   navigationStatus?: number;
   challenges?: Map<string, ChallengeResponse>;
+  challengeLimit?: ChallengeLimitError;
   block?: { status: number; path: string };
 }
 
@@ -73,6 +75,7 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
   const account: Account = {};
   let identityRevision = 0;
   let planRevision = 0;
+  let consecutiveChallenges = 0;
   const onResponse = (response: Response) => {
     const target = new URL(response.url());
     if (target.origin !== origin) return;
@@ -94,12 +97,16 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
           : planRequest ? 'plan' : target.pathname.startsWith('/backend-api/f/conversation') ? 'conversation' : 'sentinel';
         const challenge = { request, status };
         (account.challenges ??= new Map()).set(target.pathname, challenge);
+        if (++consecutiveChallenges >= 5) {
+          account.challengeLimit ??= new ChallengeLimitError('Cloudflare challenge detected 5 consecutive times; skipping this account for this run.');
+        }
         onChallenge?.({ phase: 'response', response: challenge });
       } else {
         if (status === 403 || status === 429) account.block = { status, path: target.pathname };
         if (response.ok()) {
           if (mainDocument) account.challenges?.clear();
           else account.challenges?.delete(target.pathname);
+          if (!account.challenges?.size) consecutiveChallenges = 0;
         }
       }
     }
@@ -197,6 +204,7 @@ export async function assertAccess(page: Page, account: Account, options: Access
     options.signal?.throwIfAborted();
     if (page.isClosed()) throw new Error('Automation tab was closed. No retry will be attempted.');
     if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`);
+    if (account.challengeLimit) throw account.challengeLimit;
     let snapshot: { indicators: ChallengeIndicator[]; responses: ChallengeResponse[] } | undefined;
     const challengeFrames: Frame[] = [];
     try {
