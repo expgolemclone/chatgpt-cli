@@ -59,17 +59,7 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
 
   try {
     options.signal?.throwIfAborted();
-    try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', ...actionOptions });
-    } catch (error) {
-      options.signal?.throwIfAborted();
-      if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`, { cause: error });
-      if (account.challengeLimit) throw account.challengeLimit;
-      if (account.challenges?.size) {
-        throw new AccessBlockedError('Cloudflare challenge prevented navigation. Stopping the batch.', { cause: error });
-      }
-      throw error;
-    }
+    await page.goto(url, { waitUntil: 'domcontentloaded', ...actionOptions });
     const composer = page.getByRole('textbox', {
       name: /ChatGPT に聞く|Ask anything|Ask ChatGPT|Message ChatGPT/i,
     }).filter({ visible: true }).first();
@@ -131,13 +121,28 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       stage = 'answer';
       options.onEvent?.('sent', prompt);
       await waitUntil(async () => {
-        if (await turns.count() !== previousTurns + 1 || await stopped.isVisible()) return false;
-        const turn = turns.nth(previousTurns);
-        return await turn.getAttribute('data-talvt-turn-state') === 'complete' &&
-          await turn.locator('[data-conversation-role="assistant"]').count() > 0;
+        if (await stopped.isVisible()) return false;
+        return turns.evaluateAll((elements, previous) => {
+          const turn = elements[previous];
+          if (elements.length !== previous + 1 || turn?.getAttribute('data-talvt-turn-state') !== 'complete') return false;
+          // Image-only turns can lose their assistant heading when the final gallery replaces the progress UI.
+          const gallery = turn.querySelector('[data-testid="generated-image-gallery"]');
+          if (!gallery) return turn.querySelector('[data-conversation-role="assistant"]') !== null;
+          return Array.from(gallery.querySelectorAll<HTMLImageElement>('[data-testid="generated-image-preview"] img'))
+            .some(image => image.complete && image.naturalWidth > 0);
+        }, previousTurns);
       }, answerTimeoutMs, 'Assistant answer');
       options.onEvent?.('completed', prompt);
     }
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (error instanceof AccessBlockedError) throw error;
+    if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`, { cause: error });
+    if (account.challengeLimit) throw account.challengeLimit;
+    if (account.challenges?.size) {
+      throw new AccessBlockedError(`Cloudflare challenge prevented ${stage}. Stopping the batch.`, { cause: error });
+    }
+    throw error;
   } finally {
     dispose();
   }

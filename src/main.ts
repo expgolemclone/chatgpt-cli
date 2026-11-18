@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 import { NonFreeAccountError, runChat } from './chat.ts';
-import { AccessBlockedError, ChallengeLimitError } from './browser/account.ts';
-import { launchProfile, openProfile } from './browser/edge.ts';
+import { AccessBlockedError } from './browser/account.ts';
+import { assertStandardUser, launchProfile, openProfile } from './browser/edge.ts';
 import { inspectProfile } from './browser/inspect.ts';
 import { assertProfileDirectory, createProfile, listProfiles, resolveProfiles } from './browser/profiles.ts';
 import { generateBatches } from './prompts/generate.ts';
@@ -44,13 +44,14 @@ Usage: node src/main.ts <login|open|profiles|inspect|sync|send> [options]
   --dry-run          Preview prompts without opening Edge or writing files. Send only.
   --help             Show this help.
 
+Use a non-elevated Windows terminal for inspect, sync, and live sends.
 Requires Windows, Node.js, and Microsoft Edge. No PowerShell 7 or other project
 is needed. Send force-closes only selected dedicated Edge profiles; unsaved drafts
 may be lost. Other commands never terminate existing browser windows. Cloudflare
-challenges try a visible verification checkbox once and wait up to 2 minutes.
-Five consecutive Cloudflare challenge responses skip that account for this run;
-the count resets when access clears. HTTP blocks, usage limits, and other unresolved
-challenges stop the batch. Uncertain submissions are never retried.
+challenges wait up to 2 minutes without interacting with verification controls.
+Five consecutive Cloudflare challenge responses stop the whole batch; the count
+resets when access clears. HTTP blocks, usage limits, and other unresolved
+challenges also stop the batch. Uncertain submissions are never retried.
 Prompt selection reads previous sending events from the local logs. Simultaneous
 send commands are rejected, and removing logs removes their prompt history.
 This tool does not create accounts or upgrade their plans.
@@ -82,7 +83,9 @@ async function main(): Promise<void> {
   if (command === 'inspect' && (values['profile-root'] !== undefined || values.profile?.length !== 1)) {
     throw new Error('inspect requires exactly one --profile.');
   }
-  if (command === 'send' && !values['dry-run']) {
+  const liveSend = command === 'send' && !values['dry-run'];
+  if (command === 'inspect' || command === 'sync' || liveSend) await assertStandardUser();
+  if (liveSend) {
     const { acquireSendLock } = await import('./send-lock.ts');
     process.once('exit', acquireSendLock());
   }
@@ -181,7 +184,7 @@ async function main(): Promise<void> {
             onChallenge: event => log('challenge', { ...details, ...event }),
           });
         } catch (error) {
-          if (error instanceof AccessBlockedError && !(error instanceof ChallengeLimitError)) stopBatch = true;
+          if (error instanceof AccessBlockedError) stopBatch = true;
           throw error;
         } finally {
           try {
@@ -195,9 +198,8 @@ async function main(): Promise<void> {
         if (session === sessionCount - 1) log('profile-completed', details);
       } catch (error) {
         batches.splice(batches.indexOf(batch), 1);
-        if (!stopBatch && (error instanceof NonFreeAccountError || error instanceof ChallengeLimitError)) {
-          log('profile-skipped', { ...details, reason: error instanceof ChallengeLimitError
-            ? 'cloudflare-challenge-limit' : 'non-free-account' });
+        if (!stopBatch && error instanceof NonFreeAccountError) {
+          log('profile-skipped', { ...details, reason: 'non-free-account' });
         } else {
           failed = true;
           if (stopBatch) {

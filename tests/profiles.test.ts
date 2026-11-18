@@ -139,12 +139,11 @@ test('five round-robin loops finish five rounds per session, exclude failed acco
       { names: ['paid', 'free'], visits: ['paid:1', ...allVisits('free')], status: 0, skipped: ['paid:1'] },
       { names: ['paid'], visits: ['paid:1'], status: 0, skipped: ['paid:1'] },
       { names: ['challenge', 'free'], visits: allVisits('challenge', 'free'), status: 0 },
-      { names: ['challenge-loop', 'free'], visits: ['challenge-loop:1', ...allVisits('free')],
-        status: 0, skipped: ['challenge-loop:1'] },
-      { names: ['challenge-loop'], visits: ['challenge-loop:1'], status: 0, skipped: ['challenge-loop:1'] },
+      { names: ['challenge-loop', 'free'], visits: ['challenge-loop:1'],
+        status: 1, failed: ['challenge-loop:1'], stopped: true },
       { names: ['challenge-four'], visits: allVisits('challenge-four'), status: 0 },
-      { names: ['late-challenge-loop', 'free'], visits: ['late-challenge-loop:1', 'free:1', 'late-challenge-loop:2', ...allVisits('free').slice(1)],
-        status: 0, skipped: ['late-challenge-loop:2'] },
+      { names: ['late-challenge-loop', 'free'], visits: ['late-challenge-loop:1', 'free:1', 'late-challenge-loop:2'],
+        status: 1, failed: ['late-challenge-loop:2'], stopped: true },
       { names: ['challenge-loop-cleanup-error', 'waiting'], visits: ['challenge-loop-cleanup-error:1'],
         status: 1, failed: ['challenge-loop-cleanup-error:1'], stopped: true },
       { names: ['feature-limited'], visits: allVisits('feature-limited'), status: 0 },
@@ -214,13 +213,9 @@ test('five round-robin loops finish five rounds per session, exclude failed acco
           assert.ok(minimized >= 0 && minimized < navigated);
         }
         assert.deepEqual(visitsFor('profile-skipped'), skipped);
-        for (const record of records.filter(record => record.event === 'profile-skipped' && record.profile.includes('challenge-loop'))) {
-          assert.equal(record.reason, 'cloudflare-challenge-limit');
-          const responses = records.filter(event => event.event === 'challenge' && event.phase === 'response' &&
-            visitOf(event) === visitOf(record));
-          assert.equal(responses.length, 5);
-          const closed = records.findIndex(event => event.event === 'fixture-profile-closed' && visitOf(event) === visitOf(record));
-          assert.ok(closed >= 0 && closed < records.indexOf(record), 'Close the skipped account before continuing.');
+        for (const record of records.filter(record => record.event === 'profile-failed' && record.profile.includes('challenge-loop'))) {
+          assert.equal(records.filter(event => event.event === 'challenge' && event.phase === 'response' &&
+            visitOf(event) === visitOf(record)).length, 5);
         }
         if (scenario.names.includes('challenge-four')) {
           for (const visit of scenario.visits) {

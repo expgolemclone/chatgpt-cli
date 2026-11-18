@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { assertProfileDirectory, createProfile, resolveProfiles } from '../src/browser/profiles.ts';
 import { generateBatches, type Prompt } from '../src/prompts/generate.ts';
 
@@ -28,9 +28,8 @@ test('standalone CLI resolves its own dedicated profiles without another project
         assert.match(result.stdout, /No PowerShell 7 or other project/);
         assert.match(result.stdout, /Send force-closes only selected dedicated Edge profiles/);
         assert.match(result.stdout, /Other commands never terminate existing browser windows/);
-        assert.match(result.stdout, /challenges try a visible verification checkbox once and wait up to 2 minutes/);
-        assert.match(result.stdout, /Five consecutive Cloudflare challenge responses skip that account for this run/);
-        assert.match(result.stdout, /count resets when access clears/);
+        assert.match(result.stdout, /without interacting with verification controls/);
+        assert.match(result.stdout, /Five consecutive Cloudflare challenge responses stop the whole batch/);
         assert.match(result.stdout, /%LOCALAPPDATA%\/chatgpt-cli\/profiles/);
         assert.match(result.stdout, /accounts in order for 5 loops/);
         assert.match(result.stdout, /5 prompt\/answer rounds \(25 per account\)/);
@@ -175,6 +174,35 @@ test('standalone CLI resolves its own dedicated profiles without another project
       assert.deepEqual(resolveProfiles([], localAppData), []);
       assert.throws(() => resolveProfiles([], 'relative'));
       assert.throws(() => resolveProfiles([], ''));
+    });
+    await t.test('elevated live commands stop before touching Edge, profiles, logs, or the ledger', () => {
+      const elevated = join(temporary, 'elevated.mjs');
+      writeFileSync(elevated, `
+        import koffi from ${JSON.stringify(import.meta.resolve('koffi'))};
+        const load = koffi.load;
+        koffi.load = name => name === 'shell32.dll'
+          ? { func(definition) {
+            if (!definition.includes('IsUserAnAdmin')) throw new Error('Unexpected browser process access.');
+            return () => 1;
+          } } : load(name);
+      `);
+      const profile = createProfile(join(temporary, 'elevation-profiles'));
+      const ledger = join(temporary, 'ledger.csv');
+      const csv = 'kind,value,state\n';
+      writeFileSync(ledger, csv);
+      for (const command of ['inspect', 'sync', 'send']) {
+        const result = spawnSync(process.execPath, [
+          '--import', new URL('./fixtures/send-lock.mjs', import.meta.url).href,
+          '--import', pathToFileURL(elevated).href, cli, command, '--profile', profile.path,
+          ...(command === 'sync' ? ['--ledger', ledger] : []),
+        ], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, LOCALAPPDATA: localAppData } });
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, /non-elevated Windows terminal/);
+        assert.equal(result.stdout, '');
+        assert.equal(existsSync(localAppData), false);
+        assert.deepEqual(readdirSync(profile.path), ['.gpt-usage-id']);
+        assert.equal(readFileSync(ledger, 'utf8'), csv);
+      }
     });
     await t.test('npm entry points invoke Node directly and do not depend on a PowerShell adapter', () => {
       const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));

@@ -18,6 +18,14 @@ export function edgeExecutable(): string {
   return value;
 }
 
+/** Elevated Edge hands off to a different, unelevated process. Its listener would not belong to our child. */
+export async function assertStandardUser(): Promise<void> {
+  const { default: koffi } = await import('koffi');
+  if (koffi.load('shell32.dll').func('int __stdcall IsUserAnAdmin()')()) {
+    throw new Error('Run this command in a non-elevated Windows terminal so Edge keeps its original process.');
+  }
+}
+
 export function assertIdentity(profile: Profile): void {
   assertProfileDirectory(profile.path, true);
   if (profile.id !== undefined && readProfileId(profile.path) !== profile.id) {
@@ -63,6 +71,7 @@ async function waitForExit(process: ChildProcess, milliseconds: number): Promise
 
 /** Directly start ordinary Edge, then attach only to the CDP listener owned by that new process. */
 export async function launchProfile(profile: Profile): Promise<{ context: BrowserContext; close: () => Promise<void> }> {
+  await assertStandardUser();
   assertIdentity(profile);
   const marker = join(profile.path, 'DevToolsActivePort');
   const previous = readRegularFile(marker);

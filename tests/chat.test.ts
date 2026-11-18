@@ -506,42 +506,27 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         }
       }
     });
-    await t.test('an interactive challenge is pressed before sending exactly once', async () => {
+    await t.test('interactive verification is never clicked and no message is sent', async () => {
       mode = 'normal'; sent.length = 0;
-      const events: string[] = [];
       await page.route('https://challenges.cloudflare.com/**', route => route.fulfill({
-        contentType: 'text/html', body: `<!doctype html><body><script>
-          const root = document.body.attachShadow({ mode: 'closed' });
-          root.innerHTML = '<label><input type="checkbox">Verify</label>';
-          root.querySelector('input').addEventListener('click', () => parent.postMessage('verified', '*'));
-        </script></body>`,
+        contentType: 'text/html', body: '<label><input type="checkbox">Verify</label>',
       }));
       try {
-        await runChat(page, [prompt], {
-          ...options, onEvent: event => events.push(event), beforeSend: async () => {
-            await page.evaluate(() => {
-              document.title = 'Just a moment...';
-              const host = document.createElement('div');
+        await assert.rejects(runChat(page, [prompt], {
+          ...options, challengeTimeoutMs: 200, beforeSend: async () => {
+            const url = 'https://challenges.cloudflare.com/fixture';
+            const ready = page.waitForEvent('framenavigated', { predicate: frame => frame.url() === url });
+            await page.evaluate(url => {
               const frame = document.createElement('iframe');
-              frame.src = 'https://challenges.cloudflare.com/fixture';
-              host.attachShadow({ mode: 'closed' }).append(frame);
-              document.body.append(host);
-              window.addEventListener('message', event => {
-                if (event.origin === 'https://challenges.cloudflare.com' && event.data === 'verified') {
-                  document.body.dataset.challengeClicks = String(Number(document.body.dataset.challengeClicks ?? 0) + 1);
-                  document.title = 'Local chat fixture';
-                  host.remove();
-                }
-              });
-            });
+              frame.src = url;
+              document.body.append(frame);
+            }, url);
+            await ready;
           },
-        });
-        assert.equal(await page.locator('body').getAttribute('data-challenge-clicks'), '1');
-        assert.deepEqual(sent, [prompt.text]);
-        assert.deepEqual(events, ['sending', 'sent', 'completed']);
-      } finally {
-        await page.unroute('https://challenges.cloudflare.com/**');
-      }
+        }), AccessBlockedError);
+        assert.equal(await page.frameLocator('iframe').getByRole('checkbox').isChecked(), false);
+        assert.deepEqual(sent, []);
+      } finally { await page.unroute('https://challenges.cloudflare.com/**'); }
     });
     await t.test('Cloudflare waiting pauses answer deadlines without resubmitting', async () => {
       mode = 'normal'; sent.length = 0;
@@ -719,11 +704,16 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         assert.deepEqual(events, ['sending:test', 'sent:test', 'completed:test', 'sending:next', 'sent:next', 'completed:next'], value);
         assert.equal(await page.locator('[data-talvt-turn-state="complete"]').count(), 2);
         assert.equal(await page.getByTestId('stop-button').count(), 0);
-        if (value === 'image-only') assert.equal(await page.getByTestId('generated-image-preview').count(), 2);
+        if (value === 'image-only') {
+          assert.equal(await page.locator('[data-conversation-role="assistant"]').count(), 0);
+          assert.deepEqual(await page.getByTestId('generated-image-preview').locator('img')
+            .evaluateAll(images => images.map(image => (image as HTMLImageElement).naturalWidth)), [1, 1]);
+        }
       }
     });
     await t.test('missing or unfinished answers never trigger another prompt even when Stop is absent', async () => {
-      for (const value of ['no-answer', 'generating', 'partial-answer', 'complete-while-stopping', 'streaming-response']) {
+      for (const value of ['no-answer', 'generating', 'partial-answer', 'complete-while-stopping', 'streaming-response',
+        'image-pending', 'image-broken', 'image-in-progress', 'user-attachment']) {
         mode = value; sent.length = 0;
         const events: string[] = [];
         await assert.rejects(runChat(page, [prompt, prompt], {

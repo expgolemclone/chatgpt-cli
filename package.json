@@ -8,6 +8,7 @@
     "node": ">=22.18.0"
   },
   "scripts": {
+    "pretest": "node --input-type=module -e \"import { assertStandardUser } from './src/browser/edge.ts'; await assertStandardUser()\"",
     "test": "tsc && node --test --test-concurrency=1 tests/*.test.ts",
     "login": "node src/main.ts login",
     "preview": "node src/main.ts send --dry-run",

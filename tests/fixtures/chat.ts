@@ -59,7 +59,12 @@ export function fixture(mode: string): string {
       document.body.append(stop);
       const response = await submission;
       if (!response.ok) return;
-      if (mode === 'no-answer') {
+      if (mode === 'no-answer' || mode === 'user-attachment') {
+        if (mode === 'user-attachment') {
+          const attachment = new Image();
+          attachment.src = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%221%22 height=%221%22/%3E';
+          user.append(attachment);
+        }
         turn.dataset.talvtTurnState = 'complete';
         stop.remove();
         return;
@@ -72,9 +77,19 @@ export function fixture(mode: string): string {
       if (mode === 'generating') return;
       await response.text();
       await new Promise(resolve => setTimeout(resolve, mode === 'delayed-answer' ? 200 : 40));
-      if (mode === 'image-only') {
-        turn.insertAdjacentHTML('beforeend',
-          '<button data-testid="generated-image-preview"><img alt="生成画像1" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%221%22 height=%221%22/%3E"></button>');
+      if (mode.startsWith('image-')) {
+        const gallery = document.createElement('div');
+        gallery.dataset.testid = 'generated-image-gallery';
+        gallery.innerHTML = '<button data-testid="generated-image-preview"><img alt="Generated image"></button>';
+        turn.append(gallery);
+        // A pending gallery can still have its heading. A settled image-only reply need not have one.
+        if (mode !== 'image-pending') assistant.remove();
+        const image = gallery.querySelector('img');
+        if (mode === 'image-broken') image.src = 'data:image/png;base64,AAAA';
+        else if (mode !== 'image-pending') setTimeout(() => {
+          image.src = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%221%22 height=%221%22/%3E';
+        }, 80);
+        if (mode === 'image-in-progress') { stop.remove(); return; }
       } else {
         const answer = document.createElement('p');
         answer.textContent = mode === 'quoted-access-text'

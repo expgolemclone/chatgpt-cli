@@ -1,8 +1,7 @@
 import { setTimeout } from 'node:timers/promises';
-import type { CDPSession, Frame, Page, Response } from 'playwright';
+import type { Page, Response } from 'playwright';
 
 export class AccessBlockedError extends Error {}
-export class ChallengeLimitError extends AccessBlockedError {}
 export const loginName = /^(Log in(?: or sign up)?|Sign in|ログイン(?:または新規登録)?)$/i;
 export const emailPattern = /^[^@\s]+@[^@\s]+$/;
 const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ/i;
@@ -40,7 +39,7 @@ export interface Account {
   identity?: Identity; plan?: Plan;
   navigationStatus?: number;
   challenges?: Map<string, ChallengeResponse>;
-  challengeLimit?: ChallengeLimitError;
+  challengeLimit?: AccessBlockedError;
   block?: { status: number; path: string };
 }
 
@@ -98,7 +97,7 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
         const challenge = { request, status };
         (account.challenges ??= new Map()).set(target.pathname, challenge);
         if (++consecutiveChallenges >= 5) {
-          account.challengeLimit ??= new ChallengeLimitError('Cloudflare challenge detected 5 consecutive times; skipping this account for this run.');
+          account.challengeLimit ??= new AccessBlockedError('Cloudflare challenge detected 5 consecutive times. Stopping the batch.');
         }
         onChallenge?.({ phase: 'response', response: challenge });
       } else {
@@ -135,68 +134,7 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
   } };
 }
 
-interface DomNode {
-  nodeId: number; nodeName: string; attributes?: string[]; children?: DomNode[]; shadowRoots?: DomNode[];
-}
-
-async function pressChallengeCheckbox(page: Page, frame: Frame, attempted: WeakSet<Frame>, signal?: AbortSignal): Promise<void> {
-  if (attempted.has(frame)) return;
-  let session: CDPSession | undefined;
-  try {
-    session = await page.context().newCDPSession(frame);
-    // Cloudflare can put the checkbox in a closed shadow root inside its cross-origin frame.
-    const { root } = await session.send('DOM.getDocument', { depth: -1, pierce: true }) as { root: DomNode };
-    const inputs: DomNode[] = [];
-    const visit = (node: DomNode) => {
-      const type = node.attributes?.indexOf('type') ?? -1;
-      if (node.nodeName === 'INPUT' && type >= 0 && node.attributes?.[type + 1] === 'checkbox') inputs.push(node);
-      for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) visit(child);
-    };
-    visit(root);
-    for (const input of inputs) {
-      const { object } = await session.send('DOM.resolveNode', { nodeId: input.nodeId });
-      const objectId = object.objectId;
-      if (!objectId) throw new Error('Unable to resolve Cloudflare checkbox.');
-      const inspect = async (functionDeclaration: string) => {
-        const { result, exceptionDetails } = await session!.send('Runtime.callFunctionOn', {
-          objectId, functionDeclaration, returnByValue: true,
-        });
-        if (exceptionDetails) throw new Error('Unable to inspect Cloudflare checkbox.');
-        return result.value === true;
-      };
-      if (!await inspect(`function() {
-        const label = this.closest('label');
-        const rect = label?.getBoundingClientRect();
-        return !this.disabled && !this.checked && !!rect && rect.width > 0 && rect.height > 0 &&
-          label.checkVisibility({ opacityProperty: true, visibilityProperty: true });
-      }`)) continue;
-      signal?.throwIfAborted();
-      await session.send('DOM.focus', { nodeId: input.nodeId });
-      // :focus can be false in a minimized window, even when its shadow root has focus.
-      if (!await inspect(`function() { return this.getRootNode().activeElement === this; }`)) continue;
-      signal?.throwIfAborted();
-      attempted.add(frame);
-      await session.send('Input.dispatchKeyEvent', {
-        type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, text: ' ',
-      });
-      await session.send('Input.dispatchKeyEvent', {
-        type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32,
-      });
-      return;
-    }
-  } catch (error) {
-    signal?.throwIfAborted();
-    if (!frame.isDetached() && !(error instanceof Error &&
-        /Execution context was destroyed|Cannot find context|No node with given id|Node does not belong to the document|frame does not have a separate CDP session/i.test(error.message))) {
-      throw new AccessBlockedError('Unable to interact with Cloudflare challenge. Stopping the batch.', { cause: error });
-    }
-  } finally {
-    await session?.detach().catch(() => {});
-  }
-}
-
 export async function assertAccess(page: Page, account: Account, options: AccessOptions = {}): Promise<number> {
-  const attempted = new WeakSet<Frame>();
   let waitingSince: number | undefined;
   let lastSnapshot: string | undefined;
   const timeout = options.challengeTimeoutMs ?? 120_000;
@@ -206,7 +144,6 @@ export async function assertAccess(page: Page, account: Account, options: Access
     if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`);
     if (account.challengeLimit) throw account.challengeLimit;
     let snapshot: { indicators: ChallengeIndicator[]; responses: ChallengeResponse[] } | undefined;
-    const challengeFrames: Frame[] = [];
     try {
       const notices = await page.getByText(accessText).or(page.locator('body')).filter({ visible: true }).evaluateAll((elements, excluded) =>
         elements.map(element => {
@@ -225,13 +162,15 @@ export async function assertAccess(page: Page, account: Account, options: Access
       for (const frame of page.frames()) {
         if (frame !== page.mainFrame() && /^https:\/\/challenges\.cloudflare\.com(?::443)?\//i.test(frame.url())) {
           try {
-            if (await (await frame.frameElement()).isVisible()) challengeFrames.push(frame);
+            if (await (await frame.frameElement()).isVisible()) {
+              indicators.push('iframe');
+              break;
+            }
           } catch (error) {
             if (!frame.isDetached()) throw error;
           }
         }
       }
-      if (challengeFrames.length) indicators.push('iframe');
       snapshot = { indicators, responses };
     } catch (error) {
       // A challenge can navigate during these reads. Only repeat the reads, never a submission.
@@ -259,7 +198,6 @@ export async function assertAccess(page: Page, account: Account, options: Access
       options.onChallenge?.({ phase: 'timed-out', ...snapshot, elapsedMs: Date.now() - waitingSince });
       throw new AccessBlockedError('Cloudflare challenge timed out. Stopping the batch.');
     }
-    for (const frame of challengeFrames) await pressChallengeCheckbox(page, frame, attempted, options.signal);
     await setTimeout(Math.min(options.pollMs ?? 500, remaining), undefined, options.signal ? { signal: options.signal } : {});
   }
 }
