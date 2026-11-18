@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -8,9 +8,9 @@ import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { launchProfile } from '../src/browser/edge.ts';
-import { createProfile } from '../src/browser/profiles.ts';
+import { createProfile, type Profile } from '../src/browser/profiles.ts';
 import { fixture } from './fixtures/chat.ts';
-import { closeWindow, manualPreload } from './fixtures/native-edge.ts';
+import { manualPreload, removeNativeFixture } from './fixtures/native-edge.ts';
 import { sendPacingFixture } from './fixtures/send-pacing.ts';
 
 const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
@@ -29,7 +29,7 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     }
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-  let ordinaryPid: number | undefined;
+  const ownedProfiles: Profile[] = [];
   let other: Awaited<ReturnType<typeof launchProfile>> | undefined;
   try {
     const address = server.address();
@@ -40,6 +40,7 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     const untouched = createProfile(root);
     if (!marked) unlinkSync(join(created.path, '.gpt-usage-id'));
     const selected = marked ? created : { name: created.name, path: created.path };
+    ownedProfiles.push(selected, untouched);
     const seeded = await launchProfile(selected);
     try {
       await seeded.context.addCookies([{ name: 'identity', value: 'retained-cookie', url: origin,
@@ -64,7 +65,7 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
           FIXTURE_LAUNCHES: launches, FIXTURE_PADDING: '1' },
       });
     assert.match(opened.stdout, /"profile-opened"/);
-    ordinaryPid = JSON.parse(readFileSync(launches, 'utf8').trim().split('\n').at(-1)!).pid;
+    const ordinaryPid: number = JSON.parse(readFileSync(launches, 'utf8').trim().split('\n').at(-1)!).pid;
     const deadline = Date.now() + 15_000;
     while (!observed.includes('retained-storage') && Date.now() < deadline) await setTimeout(100);
     assert.ok(observed.includes('retained-storage'), 'The ordinary browser loaded the retained profile.');
@@ -76,7 +77,7 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     const before = JSON.parse((await run('send', '--profile', selected.path,
       '--seed', 'restart-fixture', '--dry-run')).stdout);
     await assert.rejects(run('send', '--profile', selected.path, '--questions', '5'), /Unknown option/);
-    assert.doesNotThrow(() => process.kill(ordinaryPid!, 0), 'Read-only and invalid invocations never kill Edge.');
+    assert.doesNotThrow(() => process.kill(ordinaryPid, 0), 'Read-only and invalid invocations never kill Edge.');
     const denied = join(temporary, 'deny-termination.mjs');
     writeFileSync(denied, `
       import ${JSON.stringify(new URL('./fixtures/send-lock.mjs', import.meta.url).href)};
@@ -97,7 +98,7 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
       cli, 'send', '--profile', selected.path], {
       encoding: 'utf8', timeout: 20_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
     }), /Cannot terminate the selected Edge profile/);
-    assert.doesNotThrow(() => process.kill(ordinaryPid!, 0), 'A denied termination never launches automation.');
+    assert.doesNotThrow(() => process.kill(ordinaryPid, 0), 'A denied termination never launches automation.');
 
     const preload = join(temporary, 'offline-chat.mjs');
     writeFileSync(preload, `${sendPacingFixture()}
@@ -162,7 +163,7 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
       '--seed', 'restart-fixture', '--dry-run')).stdout);
     assert.notEqual(after.profiles[0].sessions[0][0].id, before.profiles[0].sessions[0][0].id);
     assert.equal(records.at(-1).success, true);
-    assert.throws(() => process.kill(ordinaryPid!, 0), 'The pre-existing selected browser was terminated.');
+    assert.throws(() => process.kill(ordinaryPid, 0), 'The pre-existing selected browser was terminated.');
     if (marked) assert.equal(readFileSync(join(selected.path, '.gpt-usage-id'), 'utf8'), created.id);
     else assert.equal(existsSync(join(selected.path, '.gpt-usage-id')), false);
     assert.equal(readFileSync(join(untouched.path, '.gpt-usage-id'), 'utf8'), untouched.id);
@@ -170,10 +171,12 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     assert.equal(existsSync(join(untouched.path, 'DevToolsActivePort')), true);
     assert.equal(existsSync(join(selected.path, 'DevToolsActivePort')), false);
   } finally {
-    if (ordinaryPid !== undefined) await closeWindow(ordinaryPid);
-    await other?.close();
-    server.closeAllConnections();
-    await new Promise<void>(resolve => server.close(() => resolve()));
-    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    try {
+      await other?.close();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await removeNativeFixture(temporary, ownedProfiles);
+    }
   }
 });

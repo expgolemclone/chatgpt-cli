@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createProfile, listProfiles } from '../src/browser/profiles.ts';
-import { closeWindow, manualPreload } from './fixtures/native-edge.ts';
+import { closeWindow, manualPreload, removeNativeFixture } from './fixtures/native-edge.ts';
 
 const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
@@ -22,11 +22,11 @@ for (const useDefault of [true, false]) test(`collection CLI discovers marked pr
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const pids: number[] = [];
+  const localAppData = join(temporary, 'localappdata');
+  const root = useDefault ? join(localAppData, 'chatgpt-cli', 'profiles') : join(temporary, 'profiles');
   try {
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
-    const localAppData = join(temporary, 'localappdata');
-    const root = useDefault ? join(localAppData, 'chatgpt-cli', 'profiles') : join(temporary, 'profiles');
     const selection = useDefault ? [] : ['--profile-root', root];
     const launches = join(temporary, 'launches.jsonl');
     const run = (args: string[], preload?: string) => spawnSync(process.execPath,
@@ -65,7 +65,6 @@ for (const useDefault of [true, false]) test(`collection CLI discovers marked pr
       assert.equal(navigations, pids.length);
       for (const record of added) {
         assert.equal(existsSync(join(record.directory, 'DevToolsActivePort')), false);
-        await closeWindow(record.pid);
       }
     };
     for (let count = 2; count <= 3; count++) {
@@ -73,6 +72,7 @@ for (const useDefault of [true, false]) test(`collection CLI discovers marked pr
       assert.equal(result.status, 0, result.stdout + result.stderr);
       assert.equal(listProfiles(root).length, count);
       await verifyLaunches(1, 'https://chatgpt.com/');
+      await closeWindow(pids.at(-1)!);
     }
     const before = listProfiles(root);
     const opened = run(['open', ...selection], preload);
@@ -87,9 +87,8 @@ for (const useDefault of [true, false]) test(`collection CLI discovers marked pr
     }
     assert.equal(existsSync(join(localAppData, 'gpt-send-messages')), false);
   } finally {
-    for (const pid of pids) await closeWindow(pid);
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
-    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    await removeNativeFixture(temporary, listProfiles(root));
   }
 });

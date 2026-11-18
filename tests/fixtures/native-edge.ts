@@ -1,5 +1,8 @@
 import { execFileSync } from 'node:child_process';
+import { rm } from 'node:fs/promises';
 import { setTimeout } from 'node:timers/promises';
+import { terminateProfiles } from '../../src/browser/processes.ts';
+import type { Profile } from '../../src/browser/profiles.ts';
 
 export const manualPreload = `
   import assert from 'node:assert/strict';
@@ -35,4 +38,10 @@ export async function closeWindow(pid: number): Promise<void> {
     await setTimeout(100);
   }
   throw new Error('Disposable ordinary Edge window did not close.');
+}
+
+/** A detached launcher's exit does not mean every process using the disposable profile has exited. */
+export async function removeNativeFixture(temporary: string, profiles: Profile[]): Promise<void> {
+  await terminateProfiles(profiles);
+  await rm(temporary, { recursive: true, force: true, maxRetries: 15, retryDelay: 200 });
 }
