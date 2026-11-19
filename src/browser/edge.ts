@@ -4,7 +4,7 @@ import { isAbsolute, join } from 'node:path';
 import { unlinkSync } from 'node:fs';
 import { setTimeout } from 'node:timers/promises';
 import type { Browser, BrowserContext } from 'playwright';
-import { assertProfileDirectory, readProfileId, type Profile } from './profiles.ts';
+import { assertIdentity, type Profile } from './profiles.ts';
 import { readRegularFile } from '../storage/files.ts';
 
 const edgeArguments = ['--no-first-run', '--no-default-browser-check', '--disable-sync',
@@ -23,13 +23,6 @@ export async function assertStandardUser(): Promise<void> {
   const { default: koffi } = await import('koffi');
   if (koffi.load('shell32.dll').func('int __stdcall IsUserAnAdmin()')()) {
     throw new Error('Run this command in a non-elevated Windows terminal so Edge keeps its original process.');
-  }
-}
-
-export function assertIdentity(profile: Profile): void {
-  assertProfileDirectory(profile.path, true);
-  if (profile.id !== undefined && readProfileId(profile.path) !== profile.id) {
-    throw new Error('Profile identity changed before launch.');
   }
 }
 

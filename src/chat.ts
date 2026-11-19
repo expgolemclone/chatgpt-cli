@@ -1,7 +1,7 @@
 import { setTimeout } from 'node:timers/promises';
 import type { Locator, Page, Response } from 'playwright';
 import type { Prompt } from './prompts/generate.ts';
-import { AccessBlockedError, assertAccess, loginName, observeAccount, type AccessOptions, type ChallengeEvent } from './browser/account.ts';
+import { AccessBlockedError, assertAccess, loginControl, observeAccount, type AccessOptions, type ChallengeEvent } from './browser/account.ts';
 export class ProfileNotReadyError extends Error {}
 export class NonFreeAccountError extends Error {}
 
@@ -35,14 +35,14 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
   const accessOptions = { ...options, onChallenge };
   const { account, dispose } = observeAccount(page, origin, onChallenge);
   const hasFreePlan = () => account.plan?.sending === 'free';
+  const login = loginControl(page);
   const stopped = page.getByTestId('stop-button').or(page.getByRole('button', { name: stopName })).first();
   const turns = page.locator('[data-talvt-turn-state]');
   const guard = async () => {
     options.signal?.throwIfAborted();
     const pausedMs = await assertAccess(page, account, accessOptions);
     if (account.plan?.sending === 'non-free') throw new NonFreeAccountError('Non-free account detected; this profile will be skipped.');
-    if (await page.getByRole('button', { name: loginName }).or(
-      page.getByRole('link', { name: loginName })).first().isVisible()) {
+    if (await login.isVisible()) {
       throw new ProfileNotReadyError('Login required; manual login is needed.');
     }
     return pausedMs;

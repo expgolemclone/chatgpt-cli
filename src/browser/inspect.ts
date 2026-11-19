@@ -1,8 +1,8 @@
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
-import { AccessBlockedError, assertAccess, loginName, observeAccount, type AccessOptions, type Account } from './account.ts';
+import { AccessBlockedError, assertAccess, loginControl, observeAccount, type AccessOptions, type Account } from './account.ts';
 import { launchProfile } from './edge.ts';
-import { assertProfileDirectory, type Profile } from './profiles.ts';
+import { assertIdentity, assertProfileDirectory, type Profile } from './profiles.ts';
 import { readRegularFile, replaceRegularFile } from '../storage/files.ts';
 
 export interface Inspection {
@@ -20,6 +20,7 @@ export function classifyProfile(account: Account, loginVisible: boolean): Inspec
   if (account.block) return result('unknown', `http_${account.block.status}`);
   const identity = account.identity;
   if (identity) {
+    if (!identity.settled) return result('unknown', 'identity_response_unsettled');
     if (identity.status === 200 && identity.validJson) {
       if (!identity.email) return result('unknown', 'identity_email_missing');
       if (loginVisible) return result('unknown', 'conflicting_login_signals');
@@ -32,8 +33,11 @@ export function classifyProfile(account: Account, loginVisible: boolean): Inspec
       return result('unknown', identity.status === 200 ? 'identity_response_invalid' : `identity_http_${identity.status}`);
     }
   }
-  return loginVisible ? result('logged_out', 'login_surface_without_authenticated_identity')
-    : result('unknown', 'identity_response_missing');
+  if (!loginVisible) return result('unknown', 'identity_response_missing');
+  if (account.plan?.status === 200 && account.plan.sending !== 'unknown') {
+    return result('unknown', 'conflicting_login_signals');
+  }
+  return result('logged_out', 'login_surface_without_authenticated_identity');
 }
 
 function writeAccessState(path: string, nextAllowed: number): void {
@@ -73,22 +77,28 @@ export async function inspectProfile(profile: Profile, options: AccessOptions & 
     stage = 'profile';
     const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
     if (!response) throw new InspectionError('navigation_http_none');
-    await assertAccess(page, observation.account, options);
-    if (observation.account.navigationStatus !== 200) throw new InspectionError(`navigation_http_${observation.account.navigationStatus}`);
-    if (new URL(page.url()).origin !== origin) throw new InspectionError('navigation_origin_changed');
-    const login = page.getByText(loginName).first();
+    const { account } = observation;
+    const login = loginControl(page);
+    let loginSince: number | undefined;
     let deadline = Date.now() + (options.readyTimeoutMs ?? 15_000);
-    while (Date.now() < deadline) {
-      deadline += await assertAccess(page, observation.account, options);
-      if (await login.isVisible()) {
-        await setTimeout(1500);
-        if (await login.isVisible()) break;
+    for (;;) {
+      const waited = await assertAccess(page, account, options);
+      deadline += waited;
+      const visible = await login.isVisible();
+      // A restriction can arrive while reading the login control.
+      if (account.block || account.challengeLimit || account.challenges?.size) continue;
+      const now = Date.now();
+      loginSince = visible ? (waited ? now : loginSince ?? now) : undefined;
+      if (account.navigationStatus !== 200) throw new InspectionError(`navigation_http_${account.navigationStatus}`);
+      if (new URL(page.url()).origin !== origin) throw new InspectionError('navigation_origin_changed');
+      // A signed-out surface can appear briefly while authentication is still loading.
+      if (now >= deadline || (account.identity?.status === 200 && account.identity.settled && account.plan?.settled)) {
+        const inspection = classifyProfile(account, visible);
+        return inspection.status === 'logged_out' && (loginSince === undefined || now - loginSince < 1500)
+          ? result('unknown', 'login_surface_not_stable') : inspection;
       }
-      if (observation.account.identity?.settled && observation.account.plan?.settled) break;
       await setTimeout(250);
     }
-    await assertAccess(page, observation.account, options);
-    return classifyProfile(observation.account, await login.isVisible());
   } catch (error) {
     const reason = observation?.account.block ? `http_${observation.account.block.status}`
       : observation?.account.challenges?.size || error instanceof AccessBlockedError ? 'access_blocked'
@@ -98,5 +108,23 @@ export async function inspectProfile(profile: Profile, options: AccessOptions & 
   } finally {
     observation?.dispose();
     await edge?.close();
+  }
+}
+
+/** Visit marked profiles serially and stop the collection on access restrictions. */
+export async function* inspectProfiles(profiles: Profile[], inspect: (profile: Profile) => Promise<Inspection> = inspectProfile) {
+  let finished: number | undefined;
+  for (const profile of profiles) {
+    if (finished !== undefined) await setTimeout(Math.max(0, 30_000 - (Date.now() - finished)));
+    if (profile.id === undefined) throw new Error('Collection inspection requires a marked profile.');
+    assertIdentity(profile);
+    const inspection = await inspect(profile);
+    finished = Date.now();
+    if (!['logged_in', 'logged_out', 'unknown'].includes(inspection.status) ||
+        !['無料', 'plus', '不明'].includes(inspection.state)) throw new Error('Invalid profile inspection.');
+    if (/http_(403|429)|access_cooldown|access_blocked/.test(inspection.reason)) {
+      throw new Error('Access rejected or cooling down. Remaining profiles were not contacted. ' + inspection.reason);
+    }
+    yield { profile, inspection };
   }
 }

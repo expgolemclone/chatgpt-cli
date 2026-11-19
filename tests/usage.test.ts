@@ -152,7 +152,7 @@ test('access rejection and cooldown stop the whole collection without retrying o
       await assert.rejects(syncUsage({ root: f.root }, f.ledger, async profile => {
         calls.push(profile.path);
         return { ...unknown(), reason };
-      }), /Sync stopped/);
+      }), /Remaining profiles were not contacted/);
       assert.equal(calls.length, 1);
       assert.equal(readFileSync(f.ledger, 'utf8'), fixtureCsv);
       assert.equal(listProfiles(f.root).length, 2);
@@ -175,8 +175,12 @@ test('profile and ledger locks exclude other CLI processes and release after ins
     await started;
     const otherRoot = join(f.temporary, 'other-pc');
     createProfile(otherRoot);
-    for (const root of [f.root, otherRoot]) {
-      const child = run(f.temporary, ['sync', '--profile-root', root, '--ledger', f.ledger]);
+    for (const args of [
+      ['sync', '--profile-root', f.root, '--ledger', f.ledger],
+      ['sync', '--profile-root', otherRoot, '--ledger', f.ledger],
+      ['prune', '--profile-root', f.root, '--apply'],
+    ]) {
+      const child = run(f.temporary, args);
       assert.equal(child.error, undefined);
       assert.equal(child.status, 1, child.stdout + child.stderr);
       assert.match(child.stderr, /already being held/);
@@ -253,13 +257,15 @@ test('real standalone CLI inspects without renaming and syncs only after ordinar
         const context = browser.contexts()[0];
         context.on('close', () => appendFileSync(${JSON.stringify(closed)}, 'closed\\n'));
         await context.route('**/*', route => {
-          assert.equal(route.request().method(), 'GET', 'Inspection must never submit prompts.');
-          const url = new URL(route.request().url());
+          const request = route.request();
+          const url = new URL(request.url());
           if (url.origin !== 'https://chatgpt.com') return route.abort();
+          assert.equal(request.method(), 'GET', 'Inspection must never submit prompts.');
           if (url.pathname === '/backend-api/me') return route.fulfill({json:{email:'a@example.test',accessToken:'SECRET'}});
           if (url.pathname.startsWith('/backend-api/accounts/check/')) return route.fulfill({json:{accounts:{default:{account:{
             structure:'personal',is_deactivated:false,plan_type:'plus'
           }}}}});
+          if (!request.isNavigationRequest()) return route.abort();
           return route.fulfill({contentType:'text/html',body:"<title>Inspection fixture</title><script>fetch('/backend-api/me');fetch('/backend-api/accounts/check/test');</script>"});
         });
         return browser;
@@ -268,7 +274,7 @@ test('real standalone CLI inspects without renaming and syncs only after ordinar
     const inspected = run(f.temporary, ['inspect', '--profile', f.profiles[0]!.path], preload);
     assert.equal(inspected.error, undefined, inspected.stdout + inspected.stderr);
     assert.equal(inspected.status, 0, inspected.stdout + inspected.stderr);
-    assert.equal(JSON.parse(inspected.stdout).state, 'plus');
+    assert.equal(JSON.parse(inspected.stdout).state, 'plus', inspected.stdout + inspected.stderr);
     assert.equal(inspected.stdout.includes('SECRET'), false);
     assert.equal(existsSync(f.profiles[0]!.path), true);
     assert.equal(readFileSync(f.ledger, 'utf8'), fixtureCsv);
@@ -276,7 +282,7 @@ test('real standalone CLI inspects without renaming and syncs only after ordinar
     assert.equal(synced.error, undefined, synced.stdout + synced.stderr);
     assert.equal(synced.status, 0, synced.stdout + synced.stderr);
     assert.equal(synced.stdout.includes('SECRET'), false);
-    assert.equal(JSON.parse(synced.stdout).results[0].state, 'plus');
+    assert.equal(JSON.parse(synced.stdout).results[0].state, 'plus', synced.stdout + synced.stderr);
     assert.equal(readLedger(f.ledger).rows[0]!.state, 'plus');
     const renamed = join(f.root, 'a@example.test');
     assert.equal(readFileSync(join(renamed, '.gpt-usage-id'), 'utf8'), f.profiles[1]!.id);
@@ -290,7 +296,7 @@ test('real standalone CLI inspects without renaming and syncs only after ordinar
     assert.equal(defaultSynced.status, 0, defaultSynced.stdout + defaultSynced.stderr);
     const defaultResults = JSON.parse(defaultSynced.stdout).results;
     assert.equal(defaultResults.length, 1);
-    assert.equal(defaultResults[0].state, 'plus');
+    assert.equal(defaultResults[0].state, 'plus', defaultSynced.stdout + defaultSynced.stderr);
     assert.equal(defaultResults[0].profile.path, join(defaultRoot, 'a@example.test'));
     assert.equal(defaultResults[0].profile.id, defaultProfile.id);
     assert.equal(readFileSync(join(defaultRoot, 'a@example.test', 'cookies.txt'), 'utf8'), 'default browser data');

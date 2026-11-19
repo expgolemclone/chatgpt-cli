@@ -75,21 +75,24 @@ test('ordinary Edge login persists data and is not launched or controlled by Pla
   }
 });
 
-test('inspection and send dry-run never terminate or unlock a busy browser', async () => {
+test('prune, inspection, and send dry-run leave a busy browser in place', async () => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-native-lock-');
   const profile = createProfile(join(temporary, 'profiles'));
   const edge = await launchProfile(profile);
   try {
     const page = edge.context.pages()[0]!;
     await page.goto('data:text/html,' + encodeURIComponent('<title>Keep existing browser</title>'));
-    const run = (command: string) => spawnSync(process.execPath, [cli, command, '--profile', profile.path,
-      ...(command === 'send' ? ['--dry-run'] : [])], {
+    const run = (command: string, ...args: string[]) => spawnSync(process.execPath, [cli, command, ...args], {
       encoding: 'utf8', timeout: 25_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
     });
-    const sent = run('send');
+    const sent = run('send', '--profile', profile.path, '--dry-run');
     assert.equal(sent.status, 0, sent.stdout + sent.stderr);
     assert.deepEqual(JSON.parse(sent.stdout).profiles[0].sessions.map((session: unknown[]) => session.length), [5, 5, 5, 5, 5]);
-    const inspected = run('inspect');
+    const pruned = run('prune', '--profile-root', dirname(profile.path), '--apply');
+    assert.equal(pruned.status, 0, pruned.stdout + pruned.stderr);
+    assert.deepEqual(JSON.parse(pruned.stdout), { profile, status: 'unknown', reason: 'profile_in_use', action: 'keep' });
+    assert.equal(existsSync(join(profile.path, '.gpt-usage-access.json')), false);
+    const inspected = run('inspect', '--profile', profile.path);
     assert.equal(inspected.status, 0, inspected.stdout + inspected.stderr);
     assert.equal(JSON.parse(inspected.stdout).status, 'unknown');
     assert.equal(await page.title(), 'Keep existing browser');

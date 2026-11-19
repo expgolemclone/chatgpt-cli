@@ -34,6 +34,9 @@ test('inspection requires current native identity and never infers login or plan
   assert.equal(classifyProfile({ identity }, false).state, '不明');
   assert.equal(classifyProfile({ identity }, true).status, 'unknown');
   assert.equal(classifyProfile({}, true).status, 'logged_out');
+  assert.equal(classifyProfile({ plan }, true).status, 'unknown');
+  assert.equal(classifyProfile({ identity: { ...identity, status: 401, validJson: false, email: null } }, true).status, 'logged_out');
+  assert.equal(classifyProfile({ identity: { ...identity, status: null, settled: false, email: null } }, true).status, 'unknown');
   assert.equal(classifyProfile({}, false).status, 'unknown');
   for (const status of [403, 429, 500]) {
     assert.equal(classifyProfile({ identity: { ...identity, status, validJson: false, email: null } }, true).status, 'unknown');

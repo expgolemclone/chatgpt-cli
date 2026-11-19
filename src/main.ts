@@ -17,7 +17,7 @@ const sessionCount = 5;
 const roundsPerSession = 5;
 
 const help = `chatgpt-cli
-Usage: node src/main.ts <login|open|profiles|inspect|sync|send> [options]
+Usage: node src/main.ts <login|open|profiles|inspect|sync|prune|send> [options]
 
   login              Open one dedicated Edge profile for manual ChatGPT login.
                      Without --profile, create exactly one fresh marked profile.
@@ -29,6 +29,9 @@ Usage: node src/main.ts <login|open|profiles|inspect|sync|send> [options]
   sync               Update an explicit ledger CSV and rename confirmed profiles.
                      Requires --ledger. Uses the selected profile or collection.
                      Keeps other ledger rows and never sends prompts.
+  prune              Preview removal of signed-out profiles as JSON lines.
+                     Close dedicated Edge windows before running. Use --apply to delete.
+                     A preview also starts the normal five-minute inspection cooldown.
   send               Terminate selected profiles' running Edge processes, then visit
                      signed-in free accounts in order for 5 loops. Each visit starts
                      one fresh conversation with 5 prompt/answer rounds (25 per account).
@@ -40,11 +43,12 @@ Usage: node src/main.ts <login|open|profiles|inspect|sync|send> [options]
                        Default: %LOCALAPPDATA%/chatgpt-cli/profiles
                        Cannot be combined with --profile.
   --ledger PATH      Existing private CSV with kind,value,state columns. Sync only.
+  --apply            Permanently delete confirmed signed-out local profiles. Prune only.
   --seed TEXT        Reproduce a selection with unchanged profiles and prompt logs.
   --dry-run          Preview prompts without opening Edge or writing files. Send only.
   --help             Show this help.
 
-Use a non-elevated Windows terminal for inspect, sync, and live sends.
+Use a non-elevated Windows terminal for inspect, sync, prune, and live sends.
 Requires Windows, Node.js, and Microsoft Edge. No PowerShell 7 or other project
 is needed. Send force-closes only selected dedicated Edge profiles; unsaved drafts
 may be lost. Other commands never terminate existing browser windows. Cloudflare
@@ -60,15 +64,16 @@ This tool does not create accounts or upgrade their plans.
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     profile: { type: 'string', multiple: true }, 'profile-root': { type: 'string' },
-    seed: { type: 'string' }, ledger: { type: 'string' },
+    seed: { type: 'string' }, ledger: { type: 'string' }, apply: { type: 'boolean', default: false },
     'dry-run': { type: 'boolean', default: false }, help: { type: 'boolean', default: false },
   } });
   if (values.help || positionals.length === 0) { console.log(help); return; }
   const command = positionals[0];
-  if (positionals.length !== 1 || !['login', 'open', 'profiles', 'inspect', 'sync', 'send'].includes(command!)) {
-    throw new Error('Choose login, open, profiles, inspect, sync, or send. Use --help for usage.');
+  if (positionals.length !== 1 || !['login', 'open', 'profiles', 'inspect', 'sync', 'prune', 'send'].includes(command!)) {
+    throw new Error('Unknown command. Use --help for usage.');
   }
   if (values.ledger !== undefined && command !== 'sync') throw new Error('--ledger is only allowed for sync.');
+  if (values.apply && command !== 'prune') throw new Error('--apply is only allowed for prune.');
   if (process.platform !== 'win32') throw new Error('This command requires Windows and Microsoft Edge.');
   const login = command === 'login';
   if (command !== 'send' && (values.seed !== undefined || values['dry-run'])) {
@@ -77,20 +82,25 @@ async function main(): Promise<void> {
   if (values['profile-root'] !== undefined && values.profile !== undefined) {
     throw new Error('Choose --profile-root or --profile, not both.');
   }
-  if (command === 'profiles' && values.profile !== undefined) {
-    throw new Error('profiles does not accept --profile; use --profile-root.');
+  if ((command === 'profiles' || command === 'prune') && values.profile !== undefined) {
+    throw new Error(`${command} does not accept --profile; use --profile-root.`);
   }
   if (command === 'inspect' && (values['profile-root'] !== undefined || values.profile?.length !== 1)) {
     throw new Error('inspect requires exactly one --profile.');
   }
   const liveSend = command === 'send' && !values['dry-run'];
-  if (command === 'inspect' || command === 'sync' || liveSend) await assertStandardUser();
+  if (command === 'inspect' || command === 'sync' || command === 'prune' || liveSend) await assertStandardUser();
   if (liveSend) {
     const { acquireSendLock } = await import('./send-lock.ts');
     process.once('exit', acquireSendLock());
   }
   const root = values.profile === undefined
     ? values['profile-root'] ?? join(process.env.LOCALAPPDATA!, 'chatgpt-cli', 'profiles') : undefined;
+  if (command === 'prune') {
+    const { pruneProfiles } = await import('./browser/prune.ts');
+    for await (const result of pruneProfiles(root!, values.apply)) console.log(JSON.stringify(result));
+    return;
+  }
   if (command === 'sync') {
     if (!values.ledger || (root === undefined && values.profile?.length !== 1)) {
       throw new Error('sync requires --ledger and accepts at most one --profile.');

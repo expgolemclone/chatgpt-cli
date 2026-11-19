@@ -1,13 +1,18 @@
 import { setTimeout } from 'node:timers/promises';
-import type { Page, Response } from 'playwright';
+import type { Page, Request, Response } from 'playwright';
 
 export class AccessBlockedError extends Error {}
-export const loginName = /^(Log in(?: or sign up)?|Sign in|ログイン(?:または新規登録)?)$/i;
+const loginName = /^(Log in(?: or sign up)?|Sign in|ログイン(?:または新規登録)?)$/i;
 export const emailPattern = /^[^@\s]+@[^@\s]+$/;
 const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ/i;
 const challengeText = /verify (?:that )?you are human|verifying (?:that )?you are human|checking your browser|performing security verification|人間であることを確認/i;
 const accessText = new RegExp(`${blockedText.source}|${challengeText.source}`, 'i');
 const conversationContent = '[data-talvt-turn-state], [data-message-author-role], [data-user-message-bubble], [role="textbox"], nav, aside';
+
+export function loginControl(page: Page) {
+  return page.getByRole('button', { name: loginName }).or(page.getByRole('link', { name: loginName }))
+    .filter({ visible: true }).first();
+}
 
 export interface ChallengeResponse {
   request: 'document' | 'identity' | 'plan' | 'conversation' | 'sentinel';
@@ -28,7 +33,7 @@ export interface AccessOptions {
 }
 
 export interface Identity {
-  status: number; settled: boolean; validJson: boolean; email: string | null;
+  status: number | null; settled: boolean; validJson: boolean; email: string | null;
 }
 export interface Plan {
   status: number; settled: boolean;
@@ -75,16 +80,29 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
   let identityRevision = 0;
   let planRevision = 0;
   let consecutiveChallenges = 0;
+  const identityPath = '/backend-api/me';
+  let latestIdentityRequest: Request | undefined;
+  const onRequest = (request: Request) => {
+    const target = new URL(request.url());
+    if (target.origin === origin && target.pathname === identityPath) {
+      latestIdentityRequest = request;
+      identityRevision++;
+      // An identity request without a response is not evidence of being signed out.
+      account.identity = { status: null, settled: false, validJson: false, email: null };
+    }
+  };
   const onResponse = (response: Response) => {
     const target = new URL(response.url());
     if (target.origin !== origin) return;
-    const identityRequest = target.pathname === '/backend-api/me';
+    const request = response.request();
+    const identityRequest = target.pathname === identityPath;
     const planRequest = target.pathname.startsWith('/backend-api/accounts/check/');
     const chatRequest = /^\/backend-api\/(?:f\/conversation|sentinel)(?:\/|$)/.test(target.pathname);
-    const mainDocument = response.request().isNavigationRequest() && response.frame() === page.mainFrame();
+    const mainDocument = request.isNavigationRequest() && response.frame() === page.mainFrame();
     const status = response.status();
     if (mainDocument) {
       account.navigationStatus = status;
+      latestIdentityRequest = undefined;
       identityRevision++;
       planRevision++;
       delete account.identity;
@@ -109,7 +127,7 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
         }
       }
     }
-    if (identityRequest) {
+    if (identityRequest && request === latestIdentityRequest) {
       const revision = ++identityRevision;
       const identity: Identity = { status, settled: status !== 200, validJson: false, email: null };
       account.identity = identity;
@@ -126,10 +144,12 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
       }).catch(() => {}).finally(() => { plan.settled = true; });
     }
   };
+  page.on('request', onRequest);
   page.on('response', onResponse);
   return { account, dispose: () => {
     identityRevision++;
     planRevision++;
+    page.off('request', onRequest);
     page.off('response', onResponse);
   } };
 }

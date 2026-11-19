@@ -1,8 +1,8 @@
 import koffi from 'koffi';
 import { isAbsolute, parse, resolve } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
-import { assertIdentity, edgeExecutable } from './edge.ts';
-import { resolveProfiles, type Profile } from './profiles.ts';
+import { edgeExecutable } from './edge.ts';
+import { assertIdentity, resolveProfiles, type Profile } from './profiles.ts';
 
 const kernel = koffi.load('kernel32.dll');
 const shell = koffi.load('shell32.dll');
@@ -46,14 +46,47 @@ function commandLine(handle: number | bigint): string | undefined {
   const status = query(handle, 60 /* ProcessCommandLineInformation */, buffer, buffer.length, null);
   if (status !== 0) {
     if (wait(handle, 0) === 0) return undefined; // The process exited during enumeration.
-    throw new Error('Cannot read a running Edge command line; no browsers will be terminated.');
+    throw new Error('Cannot read a running Edge command line.');
   }
   const value = koffi.decode(buffer, unicode) as { length: number; buffer: bigint };
   const offset = Number(value.buffer - koffi.address(buffer));
   if (value.length % 2 || offset < koffi.sizeof(unicode) || offset + value.length > buffer.length) {
-    throw new Error('Incomplete Edge command line; no browsers will be terminated.');
+    throw new Error('Incomplete Edge command line.');
   }
   return buffer.toString('utf16le', offset, offset + value.length);
+}
+
+// Keep each query handle open while yielding so its PID cannot be recycled by the caller.
+function* runningProfileProcesses(profiles: Profile[]) {
+  const executable = resolve(edgeExecutable()).toLowerCase();
+  let pids = new Uint32Array(256);
+  const used = [0];
+  for (;;) {
+    if (!enumerate(pids, pids.byteLength, used)) throw new Error('Process inventory failed.');
+    if (used[0]! < pids.byteLength) break;
+    pids = new Uint32Array(pids.length * 2);
+  }
+
+  for (const pid of pids.subarray(0, used[0]! / 4)) {
+    const handle: number | bigint = open(0x1000 | 0x100000 /* QUERY_LIMITED_INFORMATION | SYNCHRONIZE */, 0, pid);
+    if (!handle) continue; // System/protected processes cannot own an automatable dedicated profile.
+    try {
+      const name = Buffer.alloc(65_536);
+      const length = [name.length / 2];
+      if (!image(handle, 0, name, length) ||
+          resolve(name.toString('utf16le', 0, length[0]! * 2)).toLowerCase() !== executable) continue;
+      const command = commandLine(handle);
+      if (command === undefined) continue;
+      const directory = profileDirectory(command);
+      const profile = profiles.find(profile => resolve(profile.path).toLowerCase() === directory);
+      if (profile) yield { profile, pid };
+    } finally { close(handle); }
+  }
+}
+
+export function isProfileRunning(profile: Profile): boolean {
+  for (const _ of runningProfileProcesses([profile])) return true;
+  return false;
 }
 
 /** Terminate only validated selected profiles, holding process handles so PID reuse cannot target another process. */
@@ -61,35 +94,12 @@ export async function terminateProfiles(profiles: Profile[]): Promise<{ profile:
   if (!profiles.length) return [];
   resolveProfiles(profiles.map(profile => profile.path));
   for (const profile of profiles) assertIdentity(profile);
-  const executable = resolve(edgeExecutable()).toLowerCase();
-  let pids = new Uint32Array(256);
-  const used = [0];
-  for (;;) {
-    if (!enumerate(pids, pids.byteLength, used)) throw new Error('Process inventory failed; no browsers will be terminated.');
-    if (used[0]! < pids.byteLength) break;
-    pids = new Uint32Array(pids.length * 2);
-  }
-
   const targets: { profile: Profile; pid: number; handle: number | bigint }[] = [];
   try {
-    for (const pid of pids.subarray(0, used[0]! / 4)) {
-      const handle: number | bigint = open(0x1000 | 0x100000 /* QUERY_LIMITED_INFORMATION | SYNCHRONIZE */, 0, pid);
-      if (!handle) continue; // System/protected processes cannot own an automatable dedicated profile.
-      try {
-        const name = Buffer.alloc(65_536);
-        const length = [name.length / 2];
-        if (!image(handle, 0, name, length) ||
-            resolve(name.toString('utf16le', 0, length[0]! * 2)).toLowerCase() !== executable) continue;
-        const command = commandLine(handle);
-        if (command === undefined) continue;
-        const directory = profileDirectory(command);
-        const profile = profiles.find(profile => resolve(profile.path).toLowerCase() === directory);
-        if (!profile) continue;
-        // Keep the query handle until the termination handle is acquired. The PID cannot be recycled in between.
-        const owned: number | bigint = open(0x1 | 0x100000 /* TERMINATE | SYNCHRONIZE */, 0, pid);
-        if (!owned) throw new Error('Cannot terminate the selected Edge profile; no prompts will be sent.');
-        targets.push({ profile, pid, handle: owned });
-      } finally { close(handle); }
+    for (const { profile, pid } of runningProfileProcesses(profiles)) {
+      const owned: number | bigint = open(0x1 | 0x100000 /* TERMINATE | SYNCHRONIZE */, 0, pid);
+      if (!owned) throw new Error('Cannot terminate the selected Edge profile; no prompts will be sent.');
+      targets.push({ profile, pid, handle: owned });
     }
     // Finish selection before terminating anything, so discovery/permission errors cannot partially kill the batch.
     for (const target of targets) {

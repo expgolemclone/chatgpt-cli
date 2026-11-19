@@ -56,6 +56,13 @@ export function readProfileId(path: string): string | undefined {
   return value;
 }
 
+export function assertIdentity(profile: Profile): void {
+  assertProfileDirectory(profile.path, true);
+  if (profile.id !== undefined && readProfileId(profile.path) !== profile.id) {
+    throw new Error(`Profile identity changed: ${profile.path}`);
+  }
+}
+
 export function listProfiles(root: string): Profile[] {
   resolveProfiles([root]);
   if (!lstatSync(root, { throwIfNoEntry: false })) return [];

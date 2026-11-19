@@ -24,7 +24,8 @@ test('standalone CLI resolves its own dedicated profiles without another project
         const result = run(...args);
         assert.equal(result.error, undefined);
         assert.equal(result.status, 0, result.stdout + result.stderr);
-        assert.match(result.stdout, /<login\|open\|profiles\|inspect\|sync\|send>/);
+        assert.match(result.stdout, /<login\|open\|profiles\|inspect\|sync\|prune\|send>/);
+        assert.match(result.stdout, /--apply\s+Permanently delete confirmed signed-out local profiles/);
         assert.match(result.stdout, /No PowerShell 7 or other project/);
         assert.match(result.stdout, /Send force-closes only selected dedicated Edge profiles/);
         assert.match(result.stdout, /Other commands never terminate existing browser windows/);
@@ -130,6 +131,7 @@ test('standalone CLI resolves its own dedicated profiles without another project
     await t.test('invalid commands, removed count options, paths, and login options fail before side effects', () => {
       const cases = [
         ['invalid'], ['send', 'extra'], ['send', '--manifest', 'old.json'],
+        ['send', '--apply'], ['prune', '--profile', join(temporary, 'one')], ['prune', '--dry-run'],
         ['send', '--profile', ''], ['send', '--profile', 'relative'],
         ['login', '--questions', '1'], ['login', '--seed', 'test'], ['login', '--dry-run'],
         ['login', '--profile', join(temporary, 'one'), '--profile', join(temporary, 'two')],
@@ -190,10 +192,11 @@ test('standalone CLI resolves its own dedicated profiles without another project
       const ledger = join(temporary, 'ledger.csv');
       const csv = 'kind,value,state\n';
       writeFileSync(ledger, csv);
-      for (const command of ['inspect', 'sync', 'send']) {
+      for (const command of ['inspect', 'sync', 'prune', 'send']) {
         const result = spawnSync(process.execPath, [
           '--import', new URL('./fixtures/send-lock.mjs', import.meta.url).href,
-          '--import', pathToFileURL(elevated).href, cli, command, '--profile', profile.path,
+          '--import', pathToFileURL(elevated).href, cli, command,
+          ...(command === 'prune' ? ['--profile-root', dirname(profile.path), '--apply'] : ['--profile', profile.path]),
           ...(command === 'sync' ? ['--ledger', ledger] : []),
         ], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, LOCALAPPDATA: localAppData } });
         assert.equal(result.status, 1, result.stderr);
