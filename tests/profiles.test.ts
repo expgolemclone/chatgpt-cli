@@ -23,7 +23,7 @@ interface Scenario {
 const allVisits = (...names: string[]) => Array.from({ length: 5 }, (_, session) =>
   names.map(name => `${name}:${session + 1}`)).flat();
 
-test('five round-robin loops finish five rounds per session, exclude failed accounts, and stop on access blocks', async t => {
+test('five round-robin loops finish five rounds per session, skip non-free accounts, and stop on the first failure', async t => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-profiles-test-');
   try {
     const preload = join(temporary, 'fixture.mjs');
@@ -147,7 +147,7 @@ test('five round-robin loops finish five rounds per session, exclude failed acco
       { names: ['challenge-loop-cleanup-error', 'waiting'], visits: ['challenge-loop-cleanup-error:1'],
         status: 1, failed: ['challenge-loop-cleanup-error:1'], stopped: true },
       { names: ['feature-limited'], visits: allVisits('feature-limited'), status: 0 },
-      { names: ['login', 'free'], visits: ['login:1', ...allVisits('free')], status: 1, failed: ['login:1'] },
+      { names: ['login', 'free'], visits: ['login:1'], status: 1, failed: ['login:1'], stopped: true },
       { names: ['cleanup-error', 'free'], visits: ['cleanup-error:1'], status: 1, failed: ['cleanup-error:1'],
         stopped: true, attempts: { 'cleanup-error:1': 5 }, completions: { 'cleanup-error:1': 5 } },
       { names: ['blocked', 'waiting'], visits: ['blocked:1'], status: 1, failed: ['blocked:1'], stopped: true },
@@ -159,14 +159,14 @@ test('five round-robin loops finish five rounds per session, exclude failed acco
         failed: ['delayed-blocked:1'], stopped: true, attempts: { 'delayed-blocked:1': 1 } },
       { names: ['late-paid', 'free'], visits: ['late-paid:1', 'free:1', 'late-paid:2', ...allVisits('free').slice(1)],
         status: 0, skipped: ['late-paid:2'] },
-      { names: ['late-login', 'free'], visits: ['late-login:1', 'free:1', 'late-login:2', ...allVisits('free').slice(1)],
-        status: 1, failed: ['late-login:2'] },
+      { names: ['late-login', 'free'], visits: ['late-login:1', 'free:1', 'late-login:2'],
+        status: 1, failed: ['late-login:2'], stopped: true },
       { names: ['late-blocked', 'free'], visits: ['late-blocked:1', 'free:1', 'late-blocked:2'],
         status: 1, failed: ['late-blocked:2'], stopped: true },
-      { names: ['uncertain', 'free'], visits: ['uncertain:1', ...allVisits('free')], status: 1,
-        failed: ['uncertain:1'], attempts: { 'uncertain:1': 3 }, completions: { 'uncertain:1': 2 } },
-      { names: ['late-uncertain', 'free'], visits: ['late-uncertain:1', 'free:1', 'late-uncertain:2', ...allVisits('free').slice(1)],
-        status: 1, failed: ['late-uncertain:2'], attempts: { 'late-uncertain:2': 1 } },
+      { names: ['uncertain', 'free'], visits: ['uncertain:1'], status: 1,
+        failed: ['uncertain:1'], stopped: true, attempts: { 'uncertain:1': 3 }, completions: { 'uncertain:1': 2 } },
+      { names: ['late-uncertain', 'free'], visits: ['late-uncertain:1', 'free:1', 'late-uncertain:2'],
+        status: 1, failed: ['late-uncertain:2'], stopped: true, attempts: { 'late-uncertain:2': 1 } },
       { names: ['late-cleanup-error', 'free'], visits: ['late-cleanup-error:1', 'free:1', 'late-cleanup-error:2'],
         status: 1, failed: ['late-cleanup-error:2'], stopped: true,
         attempts: { 'late-cleanup-error:2': 5 }, completions: { 'late-cleanup-error:2': 5 } },

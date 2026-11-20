@@ -37,6 +37,27 @@ test('history uses latest attempted sends, including failures and uncertain outc
   } finally { rmSync(temporary, { recursive: true, force: true }); }
 });
 
+test('automatic replay requires a successful finish after the latest attempted send', () => {
+  const directory = mkdtempSync('C:/dev/tmp/chatgpt-partial-send-');
+  try {
+    const previous = join(directory, 'z.jsonl');
+    const attempted = line('sending', '2026-01-01T00:00:01Z', 'first');
+    const success = JSON.stringify({ event: 'finished', success: true });
+    const failure = JSON.stringify({ event: 'finished', success: false });
+    writeFileSync(previous, attempted); // Interrupted before completion.
+    assert.throws(() => readPromptHistory(directory, true), /Automatic replay refused/);
+    writeFileSync(previous, [attempted, line('sent', '2026-01-01T00:00:02Z', 'first'), failure].join('\n'));
+    writeFileSync(join(directory, 'login.jsonl'), success);
+    assert.throws(() => readPromptHistory(directory, true), /Automatic replay refused/);
+    assert.equal(readPromptHistory(directory).size, 1); // Preview remains available.
+    const next = join(directory, 'a.jsonl');
+    writeFileSync(next, [attempted, success].join('\n'));
+    assert.throws(() => readPromptHistory(directory, true), /Automatic replay refused/); // Equal timestamps fail closed.
+    writeFileSync(next, [line('sending', '2026-01-02T00:00:01Z', 'second'), success].join('\n'));
+    assert.equal(readPromptHistory(directory, true).size, 2);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('malformed logs and invalid sending events fail instead of silently losing history', () => {
   const temporary = mkdtempSync('C:/dev/tmp/chatgpt-prompt-history-invalid-');
   try {

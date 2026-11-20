@@ -55,7 +55,9 @@ may be lost. Other commands never terminate existing browser windows. Cloudflare
 challenges wait up to 2 minutes without interacting with verification controls.
 Five consecutive Cloudflare challenge responses stop the whole batch; the count
 resets when access clears. HTTP blocks, usage limits, and other unresolved
-challenges also stop the batch. Uncertain submissions are never retried.
+challenges also stop the batch. A failed session, including a manual-login request
+or an unconfirmed answer, stops further submissions in that invocation. After a
+partial send, unattended or collection-wide replays are refused before opening Edge.
 Prompt selection reads previous sending events from the local logs. Simultaneous
 send commands are rejected, and removing logs removes their prompt history.
 This tool does not create accounts or upgrade their plans.
@@ -122,9 +124,10 @@ async function main(): Promise<void> {
   if (command === 'send' && profiles.length === 0) throw new Error('No owned profiles in this collection. Run npm run login first.');
   const seed = values.seed ?? randomUUID();
   const logs = join(process.env.LOCALAPPDATA!, 'chatgpt-cli', 'logs');
+  const requireCompletedRun = liveSend && (!process.stdin.isTTY || values.profile?.length !== 1);
   const promptBatches = command === 'send'
     ? generateBatches(profiles.map(profile => profile.path.toLowerCase()), seed,
-      sessionCount * roundsPerSession, readPromptHistory(logs)) : [];
+      sessionCount * roundsPerSession, readPromptHistory(logs, requireCompletedRun)) : [];
   const batches = profiles.map((profile, index) => ({
     profile,
     sessions: Array.from({ length: command === 'send' ? sessionCount : 0 }, (_, session) =>
@@ -167,11 +170,9 @@ async function main(): Promise<void> {
       const { profile, sessions } = batch;
       const prompts = sessions[session]!;
       const details = { profile: profile.name, session: session + 1 };
-      let stopBatch = true;
       log('session-started', details);
       try {
         const edge = await launchProfile(profile);
-        stopBatch = false;
         try {
           const page = edge.context.pages()[0];
           if (!page) throw new Error('Edge did not create its initial tab.');
@@ -193,33 +194,23 @@ async function main(): Promise<void> {
             },
             onChallenge: event => log('challenge', { ...details, ...event }),
           });
-        } catch (error) {
-          if (error instanceof AccessBlockedError) stopBatch = true;
-          throw error;
         } finally {
-          try {
-            await edge.close();
-          } catch (error) {
-            stopBatch = true;
-            throw error;
-          }
+          await edge.close();
         }
         log('session-completed', details);
         if (session === sessionCount - 1) log('profile-completed', details);
       } catch (error) {
-        batches.splice(batches.indexOf(batch), 1);
-        if (!stopBatch && error instanceof NonFreeAccountError) {
+        if (error instanceof NonFreeAccountError) {
+          batches.splice(batches.indexOf(batch), 1);
           log('profile-skipped', { ...details, reason: 'non-free-account' });
-        } else {
-          failed = true;
-          if (stopBatch) {
-            log('batch-stopped', { ...details, reason: error instanceof AccessBlockedError
-              ? 'Access blocked; stopping further submissions in every profile.'
-              : 'The browser could not be started or closed safely; stopping further profiles.' });
-          }
-          log('profile-failed', { ...details, error: String(error) });
-          if (stopBatch) break sending;
+          continue;
         }
+        failed = true;
+        log('profile-failed', { ...details, error: String(error) });
+        log('batch-stopped', { ...details, reason: error instanceof AccessBlockedError
+          ? 'Access blocked; stopping further submissions in every profile.'
+          : 'The session failed; review its result before sending again.' });
+        break sending;
       }
     }
   }

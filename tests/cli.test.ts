@@ -123,6 +123,10 @@ test('standalone CLI resolves its own dedicated profiles without another project
           generateBatches(ids, 'history', 25, new Map([[attempted, Date.parse(time)]])));
         assert.equal(new Set(actual.flat(2).map(prompt => prompt.id)).size, 50);
         assert.equal(actual.flat(2).some(prompt => prompt.id === attempted), false);
+        const retry = run('send', '--profile', paths[0]!);
+        assert.equal(retry.status, 1);
+        assert.match(retry.stderr, /Automatic replay refused/);
+        assert.equal(retry.stdout, '');
         assert.deepEqual(readdirSync(logs), ['old.jsonl']);
         assert.equal(readFileSync(log, 'utf8'), contents);
         for (const path of paths) assert.equal(existsSync(path), false);
