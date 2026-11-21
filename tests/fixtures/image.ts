@@ -6,7 +6,7 @@ import { accountCheck, fixture } from './chat.ts';
 export async function serveImageFixture(context: BrowserContext, mode: string, submitted: (text: string) => void, origin = 'https://chatgpt.com'): Promise<void> {
   let plans = 0, identities = 0;
   const html = fixture(mode === 'login' || mode === 'draft' ? mode : mode === 'pending' ? 'image-pending'
-    : mode === 'text' ? 'normal' : mode === 'invalid' ? 'image-invalid-download' : 'image-download');
+    : mode === 'text' ? 'normal' : mode === 'invalid' ? 'image-invalid-download' : mode.startsWith('image-refs') ? mode : 'image-download');
   await context.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();

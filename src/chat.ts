@@ -1,3 +1,4 @@
+import { basename } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import type { Locator, Page, Response } from 'playwright';
 import type { Prompt } from './prompts/generate.ts';
@@ -26,6 +27,7 @@ async function composerText(composer: Locator): Promise<string> {
 interface ImageTurn {
   prompt: Prompt;
   expectedEmail?: string;
+  references?: string[];
   save: (turn: Locator) => Promise<void>;
 }
 
@@ -105,8 +107,35 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
       }
       stage = 'submission';
       const previousTurns = await turns.count();
-      if (image && (previousTurns !== 0 || new URL(page.url()).pathname !== '/' || (await composerText(composer)).trim())) {
+      const references = image?.references ?? [];
+      const names = references.map(file => basename(file));
+      const form = page.locator('form').filter({ has: composer });
+      const attachments = form.getByRole('button', { name: /^(?:Remove .+|.+ を削除する)$/i });
+      const readyAttachments = async () => await attachments.count() === names.length &&
+        (!names.length || await form.locator('img[alt]').evaluateAll((nodes, expected) => {
+          const loaded = nodes.filter((node): node is HTMLImageElement =>
+            node instanceof HTMLImageElement && node.complete && node.naturalWidth > 0);
+          // The upload UI can add "(1)" before the extension when reusing a filename.
+          const matched = expected.map(name => loaded.filter(img =>
+            img.alt === name || img.alt.replace(/ ?\(\d+\)(?=\.[^.]+$)/, '') === name));
+          return matched.every(matches => matches.length === 1) && new Set(matched.flat()).size === expected.length;
+        }, names));
+      if (image && (previousTurns !== 0 || new URL(page.url()).pathname !== '/' || (await composerText(composer)).trim() || await attachments.count())) {
         throw new ProfileNotReadyError('Expected an empty new chat; leave any existing draft untouched.');
+      }
+      if (references.length) {
+        try {
+          const input = form.getByLabel(/^(?:Attach files?|ファイルを添付)$/i);
+          await guard();
+          if (!hasRequiredPlan() || new URL(page.url()).pathname !== '/' || await turns.count() !== 0) {
+            throw new ProfileNotReadyError('The verified new chat changed before attaching references.');
+          }
+          await input.setInputFiles(references, actionOptions);
+          await waitUntil(readyAttachments, readyTimeoutMs, 'Reference previews');
+        } catch (error) {
+          if (error instanceof AccessBlockedError || error instanceof ProfileNotReadyError) throw error;
+          throw new ProfileNotReadyError('Could not confirm all reference images in the composer.', { cause: error });
+        }
       }
       await composer.fill(prompt.text, actionOptions);
       // The rich-text editor normalizes paragraphs/blank lines during fill. Compare its
@@ -122,7 +151,10 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
         throw new ProfileNotReadyError('Composer changed before sending; no message will be sent.');
       }
       if (!account.identity?.email) throw new ProfileNotReadyError('Native login identity is no longer confirmed; no message will be sent.');
-      if (image && (new URL(page.url()).pathname !== '/' || await turns.count() !== 0)) throw new ProfileNotReadyError('Chat changed before submission.');
+      if (image && (new URL(page.url()).pathname !== '/' || await turns.count() !== 0 ||
+          !await readyAttachments() || !await send.isEnabled())) {
+        throw new ProfileNotReadyError('Chat or attachments changed before submission.');
+      }
       if (!hasRequiredPlan()) throw new ProfileNotReadyError('Required account plan is no longer confirmed; no message will be sent.');
       options.onEvent?.('sending', prompt);
       let acknowledgement: Response;
@@ -154,7 +186,10 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
           if (submitted !== null) {
             const bubble = turn.querySelector<HTMLElement>('[data-user-message-bubble], [data-message-author-role="user"]');
             const normalize = (value: string) => value.replace(/\s+/g, ' ').trim();
-            if (!bubble || normalize(bubble.innerText) !== normalize(submitted)) return false;
+            if (!bubble) return false;
+            // Long messages have a localized expand affordance inside the message bubble.
+            const actual = normalize(bubble.innerText), expected = normalize(submitted);
+            if (actual !== expected && actual !== expected + ' … 展開' && actual !== expected + ' … Expand') return false;
           }
           // Image-only turns can lose their assistant heading when the final gallery replaces the progress UI.
           const gallery = turn.querySelector('[data-testid="generated-image-gallery"]');

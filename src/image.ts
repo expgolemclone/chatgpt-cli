@@ -1,6 +1,6 @@
 import { constants, lstatSync } from 'node:fs';
 import { access, copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { dirname, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { crc32 } from 'node:zlib';
 import type { Locator } from 'playwright';
 import { AccessBlockedError, emailPattern } from './browser/account.ts';
@@ -45,12 +45,17 @@ async function savePng(source: string, output: string): Promise<void> {
 
 async function downloadImage(turn: Locator, output: string): Promise<void> {
   const gallery = turn.getByTestId('generated-image-gallery');
-  const preview = gallery.getByTestId('generated-image-preview').locator('img');
-  if (await gallery.count() !== 1 || await preview.count() !== 1) throw new ImageError('The reply does not contain exactly one generated image.');
+  const preview = gallery.getByTestId('generated-image-preview');
   const timeout = 15_000;
-  await preview.hover({ timeout });
+  // The turn state may settle just before the gallery is mounted.
+  await preview.first().locator('img').waitFor({ timeout }).catch(() => {});
+  if (await gallery.count() !== 1 || await preview.count() !== 1 || await preview.locator('img').count() !== 1) {
+    throw new ImageError('The reply does not contain exactly one generated image.');
+  }
+  await preview.click({ timeout });
+  const viewer = turn.page().getByRole('dialog');
   const name = /^(?:(?:download|save)(?: (?:this )?image)?|(?:画像を)?(?:ダウンロード|保存)(?:する)?)$/i;
-  const control = turn.getByRole('button', { name }).or(turn.getByRole('link', { name }));
+  const control = viewer.getByRole('button', { name }).or(viewer.getByRole('link', { name }));
   const [download] = await Promise.all([turn.page().waitForEvent('download', { timeout }), control.click({ timeout })]);
   const timer = setTimeout(() => { void download.cancel().catch(() => {}); }, 120_000);
   try {
@@ -60,12 +65,19 @@ async function downloadImage(turn: Locator, output: string): Promise<void> {
   } finally { clearTimeout(timer); }
 }
 
-export async function generateImage(selection: Selection, promptFile: string, destination: string): Promise<string> {
+export async function generateImage(selection: Selection, promptFile: string, destination: string, referenceFiles: string[] = []): Promise<string> {
   let state = 'Not sent';
   let hint = 'Check that --prompt-file is a readable, nonempty UTF-8 file.';
   try {
     const brief = new TextDecoder('utf-8', { fatal: true }).decode(await readFile(resolve(promptFile))).trim();
     if (!brief || brief.includes('\0')) throw new ImageError(hint);
+    hint = 'Use distinct readable PNG, JPEG, or WebP files for --reference.';
+    const references = referenceFiles.map(file => resolve(file));
+    if (new Set(references.map(file => basename(file).toLowerCase())).size !== references.length) throw new ImageError(hint);
+    for (const file of references) {
+      if (!/\.(png|jpe?g|webp)$/i.test(file) || !lstatSync(file, { throwIfNoEntry: false })?.isFile()) throw new ImageError(hint);
+      await access(file, constants.R_OK);
+    }
     hint = 'Choose a new writable .png path for --output.';
     const output = resolve(destination);
     if (extname(output).toLowerCase() !== '.png' || lstatSync(output, { throwIfNoEntry: false })) throw new ImageError(hint);
@@ -88,6 +100,7 @@ export async function generateImage(selection: Selection, promptFile: string, de
         await runChat(page, {
           prompt: { id: 'image', text: `Generate exactly one image from this brief:\n\n${brief}` },
           ...(emailPattern.test(profile.name) && { expectedEmail: profile.name }),
+          references,
           save: turn => downloadImage(turn, output),
         }, { onEvent: event => {
           if (event === 'sending') { state = 'Submission unconfirmed'; hint = 'No confirmed acknowledgement.'; }

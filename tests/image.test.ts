@@ -48,7 +48,7 @@ test('standalone image CLI selects one Plus profile and saves just its downloade
     await t.test('help and invalid input or ambiguous selection never launch Edge', () => {
       const help = run(['image', '--help']);
       assert.equal(help.status, 0, help.stderr);
-      assert.match(help.stdout, /--prompt-file FILE --output NEW.png/);
+      assert.match(help.stdout, /--prompt-file FILE --output NEW.png.*--reference IMAGE/);
       assert.doesNotMatch(help.stdout, /5 loops/);
       for (const argv of [['image', ...args], [...csvArgs, '--profile', selected], [...explicit, '--profile', other],
         [...csvArgs, '--dry-run'], ['inspect', '--profile', selected, ...args]]) {
@@ -64,6 +64,8 @@ test('standalone image CLI selects one Plus profile and saves just its downloade
         assert.match(run(csvArgs).stderr, /Not sent: .*UTF-8/);
       }
       writeFileSync(join(dir, args[1]!), brief);
+      assert.match(run([...explicit, '--reference', 'missing.jpg']).stderr, /Not sent: .*--reference/);
+      assert.match(run([...explicit, '--reference', args[1]!]).stderr, /Not sent: .*--reference/);
       mkdirSync(join(dir, 'out'), { recursive: true }); writeFileSync(output, 'keep');
       assert.match(run(explicit).stderr, /Not sent: .*new writable .png/);
       assert.equal(readFileSync(output, 'utf8'), 'keep'); rmSync(output);
@@ -83,6 +85,18 @@ test('standalone image CLI selects one Plus profile and saves just its downloade
       assert.deepEqual(posted().map(line => JSON.parse(line).replace(/\s+/g, ' ')), ['Generate exactly one image from this brief: ' + brief]);
       assert.equal(readFileSync(ledger, 'utf8'), csv); assert.deepEqual(readdirSync(other), ['.gpt-usage-id']);
       assert.equal(existsSync(join(local, 'chatgpt-cli/logs')), false);
+      rmSync(output);
+    });
+
+    await t.test('attaches both local references to the same image request', () => {
+      const files = ['ロッカー reference.png', 'pouch.png'];
+      for (const file of files) writeFileSync(join(dir, file), Buffer.from(fixturePng, 'base64'));
+      const r = run([...explicit, ...files.flatMap(file => ['--reference', file])], 'image-refs');
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout.trimEnd(), output);
+      const last = JSON.parse(JSON.parse(posted().at(-1)!));
+      assert.deepEqual(last.selected, files);
+      assert.match(last.text, /Generate exactly one image from this brief:/);
       rmSync(output);
     });
 
@@ -123,11 +137,14 @@ test('Plus image verifies identity and plan at click time and never replays a ti
   const edge = await launchProfile({ name: 'fixture', path: dir });
   try {
     const origin = 'http://image-fixture.invalid';
-    for (const mode of ['switch', 'downgrade', 'pending']) {
+    const references = ['locker.png', 'pouch.png'].map(file => join(dir, file));
+    for (const file of references) writeFileSync(file, Buffer.from(fixturePng, 'base64'));
+    for (const mode of ['switch', 'downgrade', 'pending', 'image-refs-missing']) {
       const posted: string[] = [];
       const page = await edge.context.newPage();
       await serveImageFixture(edge.context, mode, text => posted.push(text), origin);
       await assert.rejects(runChat(page, { prompt: { id: 'image', text: 'offline image brief' },
+        ...(mode === 'image-refs-missing' && { references }),
         save: () => assert.fail('must not download') }, {
         url: origin + '/', readyTimeoutMs: 2500, answerTimeoutMs: 300, pollMs: 20,
         beforeSend: async () => {
@@ -135,7 +152,8 @@ test('Plus image verifies identity and plan at click time and never replays a ti
           if (mode === 'downgrade') await Promise.all([page.waitForRequest(request => request.url().endsWith(accountCheck)),
             page.evaluate(path => { void fetch(path); }, accountCheck)]);
         },
-      }), mode === 'pending' ? /Assistant answer timed out/ : mode === 'switch' ? /Account changed/ : /plan is no longer confirmed|Personal Plus/);
+      }), mode === 'pending' ? /Assistant answer timed out/ : mode === 'switch' ? /Account changed/
+        : mode === 'image-refs-missing' ? /Could not confirm all reference images/ : /plan is no longer confirmed|Personal Plus/);
       assert.equal(posted.length, mode === 'pending' ? 1 : 0);
       await edge.context.unrouteAll({ behavior: 'wait' });
       await page.close();

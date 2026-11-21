@@ -15,8 +15,11 @@ export function fixture(mode: string): string {
     ? '<button aria-label="プロフィールメニューを開く">プロフィールを読み込み中</button><button aria-label="プロフィールメニューを開く"></button>'
     : `<button data-testid="accounts-profile-button">${mode === 'plan-plus-ui-free' ? 'Free' : mode === 'plan-free-ui-plus' ? 'Plus' : 'Account'}</button>`}
   ${mode === 'modern' ? '<div id="prompt-textarea" contenteditable="true" style="display:none"></div>' : ''}
+  <form>
   <div ${mode === 'modern' ? '' : 'id="prompt-textarea"'} contenteditable="true" role="textbox" aria-label="ChatGPT に聞く">${mode === 'draft' ? 'Existing draft' : ''}</div>
-  <button aria-label="送信" disabled>Send</button>
+  <button type="button" aria-label="送信" disabled>Send</button>
+  ${mode.startsWith('image-refs') ? '<input type="file" aria-label="ファイルを添付" multiple hidden><div id="references"></div>' : ''}
+  </form>
   <main></main>
   <script>
     const mode = ${JSON.stringify(mode)};
@@ -35,6 +38,22 @@ export function fixture(mode: string): string {
       composer.replaceChildren(...paragraphs);
     });
     const send = document.querySelector('[aria-label="送信"]');
+    const selected = [];
+    if (mode.startsWith('image-refs')) {
+      const input = document.querySelector('input[type=file]');
+      input.onchange = () => {
+        const files = Array.from(input.files);
+        for (const file of mode === 'image-refs-missing' ? files.slice(0, 1) : files) {
+          const attachment = document.createElement('button');
+          attachment.type = 'button'; attachment.setAttribute('aria-label', file.name + ' を削除する');
+          const preview = new Image(); preview.alt = file.name === 'pouch.png' ? 'pouch(1).png' : file.name;
+          preview.src = 'data:image/png;base64,${fixturePng}';
+          attachment.append(preview);
+          document.querySelector('#references').append(attachment);
+          selected.push(file.name);
+        }
+      };
+    }
     composer.addEventListener('input', () => {
       if (mode !== 'send-disabled') setTimeout(() => { send.disabled = false; }, mode === 'delayed-send' ? 150 : 0);
     });
@@ -45,13 +64,16 @@ export function fixture(mode: string): string {
       send.disabled = true;
       const text = composer.innerText;
       if (mode === 'feature-failure') await fetch('${featurePath}');
-      const submission = fetch('/backend-api/f/conversation', {method: 'POST', body: text});
+      const submission = fetch('/backend-api/f/conversation', {
+        method: 'POST', body: mode.startsWith('image-refs') ? JSON.stringify({ text, selected }) : text,
+      });
       if (mode === 'no-dom-ack') return;
       const turn = document.createElement('div');
       turn.dataset.talvtTurnState = 'streaming';
       const user = document.createElement('div');
       user.dataset.userMessageBubble = 'true';
       user.textContent = text;
+      if (mode === 'image-refs') user.append(' … 展開');
       turn.append(user);
       document.querySelector('main').append(turn);
       composer.textContent = '';
@@ -84,13 +106,16 @@ export function fixture(mode: string): string {
         gallery.dataset.testid = 'generated-image-gallery';
         gallery.innerHTML = '<button data-testid="generated-image-preview"><img alt="Generated image"></button>';
         turn.append(gallery);
-        if (mode === 'image-download' || mode === 'image-invalid-download') {
+        if (mode === 'image-download' || mode === 'image-invalid-download' || mode === 'image-refs') {
           const download = document.createElement('a');
           download.download = 'fixture.png'; download.textContent = 'Download image';
           const bytes = Uint8Array.from(atob('${fixturePng}'), c => c.charCodeAt(0));
           if (mode === 'image-invalid-download') bytes[44] ^= 1; // Corrupt IDAT while keeping the PNG signature and IEND.
           download.href = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
-          gallery.append(download);
+          const viewer = document.createElement('div');
+          viewer.setAttribute('role', 'dialog'); viewer.hidden = true;
+          viewer.append(download); document.body.append(viewer);
+          gallery.querySelector('button').onclick = () => { viewer.hidden = false; };
           const unrelated = document.createElement('button');
           unrelated.textContent = 'Download image'; document.body.prepend(unrelated);
         }

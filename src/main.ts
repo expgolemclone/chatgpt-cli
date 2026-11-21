@@ -15,8 +15,9 @@ import { syncUsage } from './usage/sync.ts';
 const sessionCount = 5;
 const roundsPerSession = 5;
 
-const imageHelp = `Usage: node src/main.ts image --prompt-file FILE --output NEW.png (--ledger CSV [--profile-root DIR] | --profile DIR)
+const imageHelp = `Usage: node src/main.ts image --prompt-file FILE --output NEW.png [--reference IMAGE ...] (--ledger CSV [--profile-root DIR] | --profile DIR)
 Send one image request with a signed-in personal Plus account in a closed dedicated Edge profile.
+Repeat --reference to attach local PNG, JPEG, or WebP images to the brief.
 --ledger selects one matching owned profile without writing the CSV. --profile is an absolute dedicated directory.
 Use a non-elevated Windows terminal. File paths are relative to your current directory. Success prints only the PNG path.`;
 
@@ -71,7 +72,7 @@ This tool does not create accounts or upgrade their plans.
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     profile: { type: 'string', multiple: true }, 'profile-root': { type: 'string' },
-    'prompt-file': { type: 'string' }, output: { type: 'string' },
+    'prompt-file': { type: 'string' }, output: { type: 'string' }, reference: { type: 'string', multiple: true },
     seed: { type: 'string' }, ledger: { type: 'string' }, apply: { type: 'boolean', default: false },
     'dry-run': { type: 'boolean', default: false }, help: { type: 'boolean', default: false },
   } });
@@ -81,7 +82,9 @@ async function main(): Promise<void> {
   if (positionals.length !== 1 || !['login', 'open', 'profiles', 'inspect', 'sync', 'prune', 'send', 'image'].includes(command)) {
     throw new Error('Unknown command. Use --help for usage.');
   }
-  if (!image && (values['prompt-file'] !== undefined || values.output !== undefined)) throw new Error('Image options require image.');
+  if (!image && (values['prompt-file'] !== undefined || values.output !== undefined || values.reference !== undefined)) {
+    throw new Error('Image options require image.');
+  }
   if (values.ledger !== undefined && command !== 'sync' && !image) throw new Error('--ledger requires sync or image.');
   if (values.apply && command !== 'prune') throw new Error('--apply is only allowed for prune.');
   if (process.platform !== 'win32') throw new Error('This command requires Windows and Microsoft Edge.');
@@ -113,7 +116,7 @@ async function main(): Promise<void> {
   if (image) {
     const { generateImage } = await import('./image.ts');
     const selection = root === undefined ? { profile: values.profile![0]! } : { root, ledger: values.ledger! };
-    console.log(await generateImage(selection, values['prompt-file']!, values.output!));
+    console.log(await generateImage(selection, values['prompt-file']!, values.output!, values.reference));
     return;
   }
   if (command === 'prune') {
