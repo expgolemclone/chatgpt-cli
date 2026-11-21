@@ -2,6 +2,8 @@ import { setTimeout } from 'node:timers/promises';
 import type { Locator, Page, Response } from 'playwright';
 import type { Prompt } from './prompts/generate.ts';
 import { AccessBlockedError, assertAccess, loginControl, observeAccount, type AccessOptions, type ChallengeEvent } from './browser/account.ts';
+import { classifyProfile } from './browser/inspect.ts';
+
 export class ProfileNotReadyError extends Error {}
 export class NonFreeAccountError extends Error {}
 
@@ -21,8 +23,16 @@ async function composerText(composer: Locator): Promise<string> {
       ? element.value : element instanceof HTMLElement ? element.innerText : element.textContent ?? '');
 }
 
-/** Start one fresh conversation. Submit each prompt once and wait for its completed answer. */
-export async function runChat(page: Page, prompts: Prompt[], options: ChatOptions = {}): Promise<void> {
+interface ImageTurn {
+  prompt: Prompt;
+  expectedEmail?: string;
+  save: (turn: Locator) => Promise<void>;
+}
+
+/** Free batches and single Plus images share one guarded submission and acknowledgement path. */
+export async function runChat(page: Page, request: Prompt[] | ImageTurn, options: ChatOptions = {}): Promise<void> {
+  const image = Array.isArray(request) ? undefined : request;
+  const prompts = Array.isArray(request) ? request : [request.prompt];
   const url = options.url ?? 'https://chatgpt.com/';
   const origin = new URL(url).origin;
   const pollMs = options.pollMs ?? 500;
@@ -34,14 +44,25 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
   const onChallenge = (event: ChallengeEvent) => options.onChallenge?.({ ...event, stage });
   const accessOptions = { ...options, onChallenge };
   const { account, dispose } = observeAccount(page, origin, onChallenge);
-  const hasFreePlan = () => account.plan?.sending === 'free';
+  let expectedEmail = image?.expectedEmail?.toLowerCase();
+  const hasRequiredPlan = () => {
+    if (!image) return account.plan?.sending === 'free';
+    const inspection = classifyProfile(account, false); // guard separately rejects a visible login control.
+    if (inspection.status !== 'logged_in' || !account.plan?.settled) return false;
+    const email = inspection.email_address!.toLowerCase();
+    if (expectedEmail && email !== expectedEmail) throw new ProfileNotReadyError('Account changed; check the selected profile.');
+    if (inspection.state !== 'plus') throw new ProfileNotReadyError('Personal Plus is not confirmed; check the selected account.');
+    expectedEmail = email; // Pin even an explicitly selected profile with a non-email directory name.
+    return true;
+  };
   const login = loginControl(page);
   const stopped = page.getByTestId('stop-button').or(page.getByRole('button', { name: stopName })).first();
   const turns = page.locator('[data-talvt-turn-state]');
   const guard = async () => {
     options.signal?.throwIfAborted();
     const pausedMs = await assertAccess(page, account, accessOptions);
-    if (account.plan?.sending === 'non-free') throw new NonFreeAccountError('Non-free account detected; this profile will be skipped.');
+    if (image && new URL(page.url()).origin !== origin) throw new ProfileNotReadyError('Chat origin changed; check the selected profile.');
+    if (!image && account.plan?.sending === 'non-free') throw new NonFreeAccountError('Non-free account detected; this profile will be skipped.');
     if (await login.isVisible()) {
       throw new ProfileNotReadyError('Login required; manual login is needed.');
     }
@@ -65,25 +86,29 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
     }).filter({ visible: true }).first();
     for (const prompt of prompts) {
       stage = 'readiness';
-      const readiness = { signedIn: false, freePlan: false, composerVisible: false, composerEditable: false, generating: false };
+      const readiness = { signedIn: false, planConfirmed: false, composerVisible: false, composerEditable: false, generating: false };
       try {
         await waitUntil(async () => {
           readiness.signedIn = Boolean(account.identity?.email);
-          readiness.freePlan = hasFreePlan();
+          readiness.planConfirmed = hasRequiredPlan();
           readiness.composerVisible = await composer.isVisible();
           readiness.composerEditable = readiness.composerVisible && await composer.isEditable();
           readiness.generating = await stopped.isVisible();
-          return readiness.signedIn && readiness.freePlan && readiness.composerEditable && !readiness.generating;
+          return readiness.signedIn && readiness.planConfirmed && readiness.composerEditable && !readiness.generating;
         }, readyTimeoutMs, 'Signed-in composer');
       } catch (error) {
         if (error instanceof Error && error.message.startsWith('Signed-in composer timed out')) {
-          throw new ProfileNotReadyError(`${error.message} Readiness: ${JSON.stringify(readiness)}`);
+          throw new ProfileNotReadyError(image ? 'Cannot confirm the signed-in Plus composer; check the selected profile.'
+            : `${error.message} Readiness: ${JSON.stringify(readiness)}`);
         }
         throw error;
       }
       stage = 'submission';
       const previousTurns = await turns.count();
-      await composer.fill(prompt.text, actionOptions); // Replace any existing draft instead of appending to it.
+      if (image && (previousTurns !== 0 || new URL(page.url()).pathname !== '/' || (await composerText(composer)).trim())) {
+        throw new ProfileNotReadyError('Expected an empty new chat; leave any existing draft untouched.');
+      }
+      await composer.fill(prompt.text, actionOptions);
       // The rich-text editor normalizes paragraphs/blank lines during fill. Compare its
       // post-fill state, not the original plain text, to detect later manual edits.
       const filledText = await composerText(composer);
@@ -97,7 +122,8 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
         throw new ProfileNotReadyError('Composer changed before sending; no message will be sent.');
       }
       if (!account.identity?.email) throw new ProfileNotReadyError('Native login identity is no longer confirmed; no message will be sent.');
-      if (!hasFreePlan()) throw new ProfileNotReadyError('Free account plan is no longer confirmed; no message will be sent.');
+      if (image && (new URL(page.url()).pathname !== '/' || await turns.count() !== 0)) throw new ProfileNotReadyError('Chat changed before submission.');
+      if (!hasRequiredPlan()) throw new ProfileNotReadyError('Required account plan is no longer confirmed; no message will be sent.');
       options.onEvent?.('sending', prompt);
       let acknowledgement: Response;
       try {
@@ -122,16 +148,26 @@ export async function runChat(page: Page, prompts: Prompt[], options: ChatOption
       options.onEvent?.('sent', prompt);
       await waitUntil(async () => {
         if (await stopped.isVisible()) return false;
-        return turns.evaluateAll((elements, previous) => {
+        return turns.evaluateAll((elements, { previous, submitted }) => {
           const turn = elements[previous];
           if (elements.length !== previous + 1 || turn?.getAttribute('data-talvt-turn-state') !== 'complete') return false;
+          if (submitted !== null) {
+            const bubble = turn.querySelector<HTMLElement>('[data-user-message-bubble], [data-message-author-role="user"]');
+            const normalize = (value: string) => value.replace(/\s+/g, ' ').trim();
+            if (!bubble || normalize(bubble.innerText) !== normalize(submitted)) return false;
+          }
           // Image-only turns can lose their assistant heading when the final gallery replaces the progress UI.
           const gallery = turn.querySelector('[data-testid="generated-image-gallery"]');
           if (!gallery) return turn.querySelector('[data-conversation-role="assistant"]') !== null;
           return Array.from(gallery.querySelectorAll<HTMLImageElement>('[data-testid="generated-image-preview"] img'))
             .some(image => image.complete && image.naturalWidth > 0);
-        }, previousTurns);
+        }, { previous: previousTurns, submitted: image ? filledText : null });
       }, answerTimeoutMs, 'Assistant answer');
+      if (image) {
+        await guard();
+        if (!hasRequiredPlan()) throw new ProfileNotReadyError('Account can no longer be confirmed.');
+        await image.save(turns.nth(previousTurns));
+      }
       options.onEvent?.('completed', prompt);
     }
   } catch (error) {

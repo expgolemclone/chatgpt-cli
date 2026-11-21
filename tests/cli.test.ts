@@ -24,7 +24,7 @@ test('standalone CLI resolves its own dedicated profiles without another project
         const result = run(...args);
         assert.equal(result.error, undefined);
         assert.equal(result.status, 0, result.stdout + result.stderr);
-        assert.match(result.stdout, /<login\|open\|profiles\|inspect\|sync\|prune\|send>/);
+        assert.match(result.stdout, /<login\|open\|profiles\|inspect\|sync\|prune\|send\|image>/);
         assert.match(result.stdout, /--apply\s+Permanently delete confirmed signed-out local profiles/);
         assert.match(result.stdout, /No PowerShell 7 or other project/);
         assert.match(result.stdout, /Send force-closes only selected dedicated Edge profiles/);

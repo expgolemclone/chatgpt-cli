@@ -63,7 +63,7 @@ async function waitForExit(process: ChildProcess, milliseconds: number): Promise
 }
 
 /** Directly start ordinary Edge, then attach only to the CDP listener owned by that new process. */
-export async function launchProfile(profile: Profile): Promise<{ context: BrowserContext; close: () => Promise<void> }> {
+export async function launchProfile(profile: Profile, artifactsDir?: string): Promise<{ context: BrowserContext; close: () => Promise<void> }> {
   await assertStandardUser();
   assertIdentity(profile);
   const marker = join(profile.path, 'DevToolsActivePort');
@@ -119,7 +119,7 @@ export async function launchProfile(profile: Profile): Promise<{ context: Browse
         }
         if (!running(process)) throw new Error('Edge exited before CDP attachment.');
         const { chromium } = await import('playwright');
-        browser = await chromium.connectOverCDP(endpoint, { timeout: 15_000 });
+        browser = await chromium.connectOverCDP(endpoint, { timeout: 15_000, ...(artifactsDir && { artifactsDir }) });
         if (browser.contexts().length !== 1) throw new Error('Unexpected Edge browser context count.');
         return { context: browser.contexts()[0]!, close };
       }

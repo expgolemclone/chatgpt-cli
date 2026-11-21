@@ -81,10 +81,18 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
   let planRevision = 0;
   let consecutiveChallenges = 0;
   const identityPath = '/backend-api/me';
+  const planPath = '/backend-api/accounts/check/';
   let latestIdentityRequest: Request | undefined;
+  let latestPlanRequest: Request | undefined;
   const onRequest = (request: Request) => {
     const target = new URL(request.url());
-    if (target.origin === origin && target.pathname === identityPath) {
+    if (target.origin !== origin) return;
+    if (target.pathname.startsWith(planPath)) {
+      latestPlanRequest = request;
+      planRevision++;
+      delete account.plan;
+    }
+    if (target.pathname === identityPath) {
       latestIdentityRequest = request;
       identityRevision++;
       // An identity request without a response is not evidence of being signed out.
@@ -96,13 +104,13 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
     if (target.origin !== origin) return;
     const request = response.request();
     const identityRequest = target.pathname === identityPath;
-    const planRequest = target.pathname.startsWith('/backend-api/accounts/check/');
+    const planRequest = target.pathname.startsWith(planPath);
     const chatRequest = /^\/backend-api\/(?:f\/conversation|sentinel)(?:\/|$)/.test(target.pathname);
     const mainDocument = request.isNavigationRequest() && response.frame() === page.mainFrame();
     const status = response.status();
     if (mainDocument) {
       account.navigationStatus = status;
-      latestIdentityRequest = undefined;
+      latestIdentityRequest = latestPlanRequest = undefined;
       identityRevision++;
       planRevision++;
       delete account.identity;
@@ -135,7 +143,7 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
         if (identityRevision === revision) Object.assign(identity, parseIdentity(value));
       }).catch(() => {}).finally(() => { identity.settled = true; });
     }
-    if (planRequest) {
+    if (planRequest && request === latestPlanRequest) {
       const revision = ++planRevision;
       const plan: Plan = { status, settled: status !== 200, personal: '不明', sending: 'unknown' };
       account.plan = plan;

@@ -9,15 +9,19 @@ import { AccessBlockedError } from './browser/account.ts';
 import { assertStandardUser, launchProfile, openProfile } from './browser/edge.ts';
 import { inspectProfile } from './browser/inspect.ts';
 import { assertProfileDirectory, createProfile, listProfiles, resolveProfiles } from './browser/profiles.ts';
-import { generateBatches } from './prompts/generate.ts';
 import { readPromptHistory } from './prompts/history.ts';
 import { syncUsage } from './usage/sync.ts';
 
 const sessionCount = 5;
 const roundsPerSession = 5;
 
+const imageHelp = `Usage: node src/main.ts image --prompt-file FILE --output NEW.png (--ledger CSV [--profile-root DIR] | --profile DIR)
+Send one image request with a signed-in personal Plus account in a closed dedicated Edge profile.
+--ledger selects one matching owned profile without writing the CSV. --profile is an absolute dedicated directory.
+Use a non-elevated Windows terminal. File paths are relative to your current directory. Success prints only the PNG path.`;
+
 const help = `chatgpt-cli
-Usage: node src/main.ts <login|open|profiles|inspect|sync|prune|send> [options]
+Usage: node src/main.ts <login|open|profiles|inspect|sync|prune|send|image> [options]
 
   login              Open one dedicated Edge profile for manual ChatGPT login.
                      Without --profile, create exactly one fresh marked profile.
@@ -32,6 +36,7 @@ Usage: node src/main.ts <login|open|profiles|inspect|sync|prune|send> [options]
   prune              Preview removal of signed-out profiles as JSON lines.
                      Close dedicated Edge windows before running. Use --apply to delete.
                      A preview also starts the normal five-minute inspection cooldown.
+  image              Generate one PNG using a signed-in Plus profile. See image --help.
   send               Terminate selected profiles' running Edge processes, then visit
                      signed-in free accounts in order for 5 loops. Each visit starts
                      one fresh conversation with 5 prompt/answer rounds (25 per account).
@@ -42,7 +47,7 @@ Usage: node src/main.ts <login|open|profiles|inspect|sync|prune|send> [options]
   --profile-root PATH  Collection of marked profiles, excluding archive.
                        Default: %LOCALAPPDATA%/chatgpt-cli/profiles
                        Cannot be combined with --profile.
-  --ledger PATH      Existing private CSV with kind,value,state columns. Sync only.
+  --ledger PATH      Existing private CSV with kind,value,state columns. Read-only for image.
   --apply            Permanently delete confirmed signed-out local profiles. Prune only.
   --seed TEXT        Reproduce a selection with unchanged profiles and prompt logs.
   --dry-run          Preview prompts without opening Edge or writing files. Send only.
@@ -66,15 +71,18 @@ This tool does not create accounts or upgrade their plans.
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     profile: { type: 'string', multiple: true }, 'profile-root': { type: 'string' },
+    'prompt-file': { type: 'string' }, output: { type: 'string' },
     seed: { type: 'string' }, ledger: { type: 'string' }, apply: { type: 'boolean', default: false },
     'dry-run': { type: 'boolean', default: false }, help: { type: 'boolean', default: false },
   } });
-  if (values.help || positionals.length === 0) { console.log(help); return; }
   const command = positionals[0];
-  if (positionals.length !== 1 || !['login', 'open', 'profiles', 'inspect', 'sync', 'prune', 'send'].includes(command!)) {
+  if (values.help || !command) { console.log(command === 'image' ? imageHelp : help); return; }
+  const image = command === 'image';
+  if (positionals.length !== 1 || !['login', 'open', 'profiles', 'inspect', 'sync', 'prune', 'send', 'image'].includes(command)) {
     throw new Error('Unknown command. Use --help for usage.');
   }
-  if (values.ledger !== undefined && command !== 'sync') throw new Error('--ledger is only allowed for sync.');
+  if (!image && (values['prompt-file'] !== undefined || values.output !== undefined)) throw new Error('Image options require image.');
+  if (values.ledger !== undefined && command !== 'sync' && !image) throw new Error('--ledger requires sync or image.');
   if (values.apply && command !== 'prune') throw new Error('--apply is only allowed for prune.');
   if (process.platform !== 'win32') throw new Error('This command requires Windows and Microsoft Edge.');
   const login = command === 'login';
@@ -91,13 +99,23 @@ async function main(): Promise<void> {
     throw new Error('inspect requires exactly one --profile.');
   }
   const liveSend = command === 'send' && !values['dry-run'];
-  if (command === 'inspect' || command === 'sync' || command === 'prune' || liveSend) await assertStandardUser();
-  if (liveSend) {
+  if (image && (!values['prompt-file']?.trim() || !values.output?.trim() || (values.profile === undefined
+    ? !values.ledger?.trim() : values.profile.length !== 1 || values.ledger !== undefined))) {
+    throw new Error('Not sent: specify --prompt-file, --output and either --ledger or one --profile. See image --help.');
+  }
+  if (command === 'inspect' || command === 'sync' || command === 'prune' || liveSend || image) await assertStandardUser();
+  if (liveSend || image) {
     const { acquireSendLock } = await import('./send-lock.ts');
     process.once('exit', acquireSendLock());
   }
   const root = values.profile === undefined
     ? values['profile-root'] ?? join(process.env.LOCALAPPDATA!, 'chatgpt-cli', 'profiles') : undefined;
+  if (image) {
+    const { generateImage } = await import('./image.ts');
+    const selection = root === undefined ? { profile: values.profile![0]! } : { root, ledger: values.ledger! };
+    console.log(await generateImage(selection, values['prompt-file']!, values.output!));
+    return;
+  }
   if (command === 'prune') {
     const { pruneProfiles } = await import('./browser/prune.ts');
     for await (const result of pruneProfiles(root!, values.apply)) console.log(JSON.stringify(result));
@@ -126,7 +144,7 @@ async function main(): Promise<void> {
   const logs = join(process.env.LOCALAPPDATA!, 'chatgpt-cli', 'logs');
   const requireCompletedRun = liveSend && (!process.stdin.isTTY || values.profile?.length !== 1);
   const promptBatches = command === 'send'
-    ? generateBatches(profiles.map(profile => profile.path.toLowerCase()), seed,
+    ? (await import('./prompts/generate.ts')).generateBatches(profiles.map(profile => profile.path.toLowerCase()), seed,
       sessionCount * roundsPerSession, readPromptHistory(logs, requireCompletedRun)) : [];
   const batches = profiles.map((profile, index) => ({
     profile,

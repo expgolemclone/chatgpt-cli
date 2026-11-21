@@ -1,3 +1,5 @@
+// Fixed 1x1 PNG for the offline download fixture.
+export const fixturePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 export const accountCheck = '/backend-api/accounts/check/v4-2023-04-27';
 export const featurePath = '/backend-api/bazaar/obi/sync-token';
 
@@ -82,6 +84,16 @@ export function fixture(mode: string): string {
         gallery.dataset.testid = 'generated-image-gallery';
         gallery.innerHTML = '<button data-testid="generated-image-preview"><img alt="Generated image"></button>';
         turn.append(gallery);
+        if (mode === 'image-download' || mode === 'image-invalid-download') {
+          const download = document.createElement('a');
+          download.download = 'fixture.png'; download.textContent = 'Download image';
+          const bytes = Uint8Array.from(atob('${fixturePng}'), c => c.charCodeAt(0));
+          if (mode === 'image-invalid-download') bytes[44] ^= 1; // Corrupt IDAT while keeping the PNG signature and IEND.
+          download.href = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+          gallery.append(download);
+          const unrelated = document.createElement('button');
+          unrelated.textContent = 'Download image'; document.body.prepend(unrelated);
+        }
         // A pending gallery can still have its heading. A settled image-only reply need not have one.
         if (mode !== 'image-pending') assistant.remove();
         const image = gallery.querySelector('img');
