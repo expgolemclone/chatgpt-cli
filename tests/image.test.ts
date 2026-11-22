@@ -109,6 +109,22 @@ test('standalone image CLI selects one Plus profile and saves just its downloade
       }
     });
 
+    await t.test('suggests another Plus profile only for Cloudflare before submission', () => {
+      const before = posted().length;
+      for (const mode of ['cloudflare', 'blocked']) {
+        const r = run(csvArgs, mode);
+        assert.equal(r.status, 1, r.stderr); assert.equal(r.stdout, '');
+        if (mode === 'cloudflare') {
+          assert.match(r.stderr, /Not sent: Cloudflare verification did not clear.*--profile DIR.*another signed-in Plus profile/);
+        } else {
+          assert.match(r.stderr, /Not sent: Access is restricted/);
+          assert.doesNotMatch(r.stderr, /--profile DIR/);
+        }
+        assert.doesNotMatch(r.stderr, /Check chat history|example\.test|非公開/);
+        assert.equal(posted().length, before); assert.equal(existsSync(output), false);
+      }
+    });
+
     await t.test('never kills a busy selected profile', async () => {
       const edge = await launchProfile({ name: 'selected', path: selected });
       try {
@@ -118,12 +134,13 @@ test('standalone image CLI selects one Plus profile and saves just its downloade
     });
 
     await t.test('failed or restricted replies never resubmit, overwrite, or publish a partial file', () => {
-      for (const mode of ['quota', 'invalid', 'text', 'race']) {
+      for (const mode of ['quota', 'submission-cloudflare', 'invalid', 'text', 'race']) {
         const before = posted().length, r = run(explicit, mode);
         assert.equal(r.status, 1, r.stderr); assert.equal(r.stdout, '');
-        assert.match(r.stderr, mode === 'quota' ? /Submission unconfirmed: Access is restricted/ : /Sent:/);
+        assert.match(r.stderr, mode === 'quota' || mode === 'submission-cloudflare'
+          ? /Submission unconfirmed: Access is restricted/ : /Sent:/);
         if (mode === 'invalid') assert.match(r.stderr, /not an intact PNG/);
-        assert.match(r.stderr, /Check chat history/); assert.doesNotMatch(r.stderr, /example\.test|非公開/);
+        assert.match(r.stderr, /Check chat history/); assert.doesNotMatch(r.stderr, /--profile DIR|example\.test|非公開/);
         assert.equal(posted().length, before + 1);
         if (mode === 'race') assert.equal(readFileSync(output, 'utf8'), 'other writer');
         else assert.equal(existsSync(output), false);

@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import type { Page } from 'playwright';
-import { AccessBlockedError, assertAccess, observeAccount, type ChallengeEvent } from '../src/browser/account.ts';
+import { AccessBlockedError, CloudflareChallengeError, assertAccess, observeAccount, type ChallengeEvent } from '../src/browser/account.ts';
 import { runChat } from '../src/chat.ts';
 
-const challengeLimit = /5 consecutive times/;
+const challengeLimit = (error: unknown) => error instanceof CloudflareChallengeError && /5 consecutive times/.test(error.message);
 
 function observedPage() {
   const frame = {};
@@ -34,7 +34,7 @@ test('Cloudflare streaks count responses, not polls, and stop on the fifth respo
   try {
     for (let count = 0; count < 4; count++) respond();
     await assert.rejects(assertAccess(page, account, { pollMs: 1, challengeTimeoutMs: 20 }),
-      (error: unknown) => error instanceof AccessBlockedError && /timed out/.test(error.message));
+      (error: unknown) => error instanceof CloudflareChallengeError && /timed out/.test(error.message));
     assert.equal(account.challengeLimit, undefined);
     respond();
     assert.equal(events.length, 5);
@@ -107,6 +107,6 @@ test('a tab closing during readiness does not hide an unresolved access challeng
   page.goto = async () => { respond('/backend-api/me'); return null; };
   page.isClosed = () => true;
   await assert.rejects(runChat(page, [{ id: 'test', text: 'test' }]), (error: unknown) =>
-    error instanceof AccessBlockedError && /prevented readiness/.test(error.message));
+    error instanceof CloudflareChallengeError && /prevented readiness/.test(error.message));
 });
 

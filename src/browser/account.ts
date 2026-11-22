@@ -2,6 +2,7 @@ import { setTimeout } from 'node:timers/promises';
 import type { Page, Request, Response } from 'playwright';
 
 export class AccessBlockedError extends Error {}
+export class CloudflareChallengeError extends AccessBlockedError {}
 const loginName = /^(Log in(?: or sign up)?|Sign in|ログイン(?:または新規登録)?)$/i;
 export const emailPattern = /^[^@\s]+@[^@\s]+$/;
 const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ/i;
@@ -44,7 +45,7 @@ export interface Account {
   identity?: Identity; plan?: Plan;
   navigationStatus?: number;
   challenges?: Map<string, ChallengeResponse>;
-  challengeLimit?: AccessBlockedError;
+  challengeLimit?: CloudflareChallengeError;
   block?: { status: number; path: string };
 }
 
@@ -123,7 +124,7 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
         const challenge = { request, status };
         (account.challenges ??= new Map()).set(target.pathname, challenge);
         if (++consecutiveChallenges >= 5) {
-          account.challengeLimit ??= new AccessBlockedError('Cloudflare challenge detected 5 consecutive times. Stopping the batch.');
+          account.challengeLimit ??= new CloudflareChallengeError('Cloudflare challenge detected 5 consecutive times. Stopping the batch.');
         }
         onChallenge?.({ phase: 'response', response: challenge });
       } else {
@@ -224,7 +225,7 @@ export async function assertAccess(page: Page, account: Account, options: Access
     if (remaining <= 0) {
       if (!snapshot) throw new Error('Page navigation did not settle. No retry will be attempted.');
       options.onChallenge?.({ phase: 'timed-out', ...snapshot, elapsedMs: Date.now() - waitingSince });
-      throw new AccessBlockedError('Cloudflare challenge timed out. Stopping the batch.');
+      throw new CloudflareChallengeError('Cloudflare challenge timed out. Stopping the batch.');
     }
     await setTimeout(Math.min(options.pollMs ?? 500, remaining), undefined, options.signal ? { signal: options.signal } : {});
   }

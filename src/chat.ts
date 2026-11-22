@@ -2,7 +2,8 @@ import { basename } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import type { Locator, Page, Response } from 'playwright';
 import type { Prompt } from './prompts/generate.ts';
-import { AccessBlockedError, assertAccess, loginControl, observeAccount, type AccessOptions, type ChallengeEvent } from './browser/account.ts';
+import { AccessBlockedError, CloudflareChallengeError, assertAccess, loginControl, observeAccount,
+  type AccessOptions, type ChallengeEvent } from './browser/account.ts';
 import { classifyProfile } from './browser/inspect.ts';
 
 export class ProfileNotReadyError extends Error {}
@@ -211,7 +212,7 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
     if (account.block) throw new AccessBlockedError(`HTTP ${account.block.status} ${account.block.path}`, { cause: error });
     if (account.challengeLimit) throw account.challengeLimit;
     if (account.challenges?.size) {
-      throw new AccessBlockedError(`Cloudflare challenge prevented ${stage}. Stopping the batch.`, { cause: error });
+      throw new CloudflareChallengeError(`Cloudflare challenge prevented ${stage}. Stopping the batch.`, { cause: error });
     }
     throw error;
   } finally {

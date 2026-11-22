@@ -3,7 +3,7 @@ import { access, copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { crc32 } from 'node:zlib';
 import type { Locator } from 'playwright';
-import { AccessBlockedError, emailPattern } from './browser/account.ts';
+import { AccessBlockedError, CloudflareChallengeError, emailPattern } from './browser/account.ts';
 import { launchProfile } from './browser/edge.ts';
 import { isProfileRunning } from './browser/processes.ts';
 import { assertIdentity, listProfiles, resolveProfiles, type Profile } from './browser/profiles.ts';
@@ -112,7 +112,9 @@ export async function generateImage(selection: Selection, promptFile: string, de
     return output;
   } catch (error) {
     // Do not print browser call logs, ledger rows, signed URLs or prompt contents.
-    const reason = error instanceof AccessBlockedError ? 'Access is restricted; check ChatGPT manually.'
+    const reason = state === 'Not sent' && error instanceof CloudflareChallengeError
+      ? 'Cloudflare verification did not clear. Check ChatGPT in Edge, or replace the profile selection options with --profile DIR to use another signed-in Plus profile that already has normal access.'
+      : error instanceof AccessBlockedError ? 'Access is restricted; check ChatGPT manually.'
       : error instanceof ImageError || error instanceof ProfileNotReadyError ? error.message : hint;
     throw new Error(`${state}: ${reason}${state === 'Sent' || state === 'Submission unconfirmed' ? ' Check chat history before retrying.' : ''}`, { cause: error });
   }
