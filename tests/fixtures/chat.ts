@@ -106,19 +106,7 @@ export function fixture(mode: string): string {
         gallery.dataset.testid = 'generated-image-gallery';
         gallery.innerHTML = '<button data-testid="generated-image-preview"><img alt="Generated image"></button>';
         turn.append(gallery);
-        if (mode === 'image-download' || mode === 'image-invalid-download' || mode === 'image-refs') {
-          const download = document.createElement('a');
-          download.download = 'fixture.png'; download.textContent = 'Download image';
-          const bytes = Uint8Array.from(atob('${fixturePng}'), c => c.charCodeAt(0));
-          if (mode === 'image-invalid-download') bytes[44] ^= 1; // Corrupt IDAT while keeping the PNG signature and IEND.
-          download.href = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
-          const viewer = document.createElement('div');
-          viewer.setAttribute('role', 'dialog'); viewer.hidden = true;
-          viewer.append(download); document.body.append(viewer);
-          gallery.querySelector('button').onclick = () => { viewer.hidden = false; };
-          const unrelated = document.createElement('button');
-          unrelated.textContent = 'Download image'; document.body.prepend(unrelated);
-        }
+        // The streaming preview exists before the saved conversation's download viewer.
         // A pending gallery can still have its heading. A settled image-only reply need not have one.
         if (mode !== 'image-pending') assistant.remove();
         const image = gallery.querySelector('img');

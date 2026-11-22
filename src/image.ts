@@ -32,7 +32,7 @@ async function savePng(source: string, output: string): Promise<void> {
   await copyFile(source, output, constants.COPYFILE_EXCL);
 }
 
-async function downloadImage(turn: Locator, output: string): Promise<void> {
+async function downloadImage(turn: Locator, output: string, artifacts: string): Promise<void> {
   const gallery = turn.getByTestId('generated-image-gallery');
   const preview = gallery.getByTestId('generated-image-preview');
   const timeout = 15_000;
@@ -41,16 +41,27 @@ async function downloadImage(turn: Locator, output: string): Promise<void> {
   if (await gallery.count() !== 1 || await preview.count() !== 1 || await preview.locator('img').count() !== 1) {
     throw new ImageError('The reply does not contain exactly one generated image.');
   }
-  await preview.click({ timeout });
-  const viewer = turn.page().getByRole('dialog');
+  const page = turn.page();
+  const viewer = page.getByRole('dialog');
   const name = /^(?:(?:download|save)(?: (?:this )?image)?|(?:画像を)?(?:ダウンロード|保存)(?:する)?)$/i;
   const control = viewer.getByRole('button', { name }).or(viewer.getByRole('link', { name }));
-  const [download] = await Promise.all([turn.page().waitForEvent('download', { timeout }), control.click({ timeout })]);
+  try {
+    await preview.click({ timeout });
+    await control.waitFor({ state: 'visible', timeout });
+  } catch (cause) { throw new ImageError('The generated image viewer did not offer a unique download control.', { cause }); }
+  const [download] = await Promise.all([page.waitForEvent('download', { timeout: 60_000 }), control.click({ timeout })])
+    .catch(cause => { throw new ImageError('The viewer did not start a browser download.', { cause }); });
   const timer = setTimeout(() => { void download.cancel().catch(() => {}); }, 120_000);
   try {
-    const source = await download.path(); // Only the user-facing download, never a thumbnail or private URL.
-    if (!source) throw new ImageError('Image download failed.');
-    await savePng(source, output);
+    // A browser download is not necessarily a file on the CLI's filesystem.
+    const source = join(artifacts, 'reply.png');
+    try { await download.saveAs(source); }
+    catch (cause) { throw new ImageError('The browser could not transfer the downloaded image.', { cause }); }
+    try { await savePng(source, output); }
+    catch (cause) {
+      if (cause instanceof ImageError) throw cause;
+      throw new ImageError('Could not publish the PNG to a new writable output file.', { cause });
+    }
   } finally { clearTimeout(timer); }
 }
 
@@ -90,10 +101,10 @@ export async function generateImage(profile: Profile, promptFile: string, destin
           prompt: { id: 'image', text: `Generate exactly one image from this brief:\n\n${brief}` },
           ...(emailPattern.test(profile.name) && { expectedEmail: profile.name }),
           references,
-          save: turn => downloadImage(turn, output),
+          save: turn => downloadImage(turn, output, artifacts),
         }, { onEvent: event => {
           if (event === 'sending') { state = 'Submission unconfirmed'; hint = 'No confirmed acknowledgement.'; }
-          if (event === 'sent') { state = 'Sent'; hint = 'Could not save the generated PNG; check the download and output path.'; }
+          if (event === 'sent') { state = 'Sent'; hint = 'Could not confirm the completed image reply.'; }
           if (event === 'completed') { state = 'PNG saved'; hint = 'Check the saved file and close the dedicated profile.'; }
         } });
       } finally { await edge.close(); }

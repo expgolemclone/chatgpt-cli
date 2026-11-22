@@ -25,6 +25,26 @@ async function composerText(composer: Locator): Promise<string> {
       ? element.value : element instanceof HTMLElement ? element.innerText : element.textContent ?? '');
 }
 
+function hasCompletedReply(turns: Locator, previous: number, submitted: string | null): Promise<boolean> {
+  return turns.evaluateAll((elements, { previous, submitted }) => {
+    const turn = elements[previous];
+    if (elements.length !== previous + 1 || turn?.getAttribute('data-talvt-turn-state') !== 'complete') return false;
+    if (submitted !== null) {
+      const bubble = turn.querySelector<HTMLElement>('[data-user-message-bubble], [data-message-author-role="user"]');
+      const normalize = (value: string) => value.replace(/\s+/g, ' ').trim();
+      if (!bubble) return false;
+      // Long messages have a localized expand affordance inside the message bubble.
+      const actual = normalize(bubble.innerText), expected = normalize(submitted);
+      if (actual !== expected && actual !== expected + ' … 展開' && actual !== expected + ' … Expand') return false;
+    }
+    // Image-only turns can lose their assistant heading when the final gallery replaces the progress UI.
+    const gallery = turn.querySelector('[data-testid="generated-image-gallery"]');
+    if (!gallery) return turn.querySelector('[data-conversation-role="assistant"]') !== null;
+    return Array.from(gallery.querySelectorAll<HTMLImageElement>('[data-testid="generated-image-preview"] img'))
+      .some(image => image.complete && image.naturalWidth > 0);
+  }, { previous, submitted });
+}
+
 interface ImageTurn {
   prompt: Prompt;
   expectedEmail?: string;
@@ -179,27 +199,20 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
       }
       stage = 'answer';
       options.onEvent?.('sent', prompt);
-      await waitUntil(async () => {
-        if (await stopped.isVisible()) return false;
-        return turns.evaluateAll((elements, { previous, submitted }) => {
-          const turn = elements[previous];
-          if (elements.length !== previous + 1 || turn?.getAttribute('data-talvt-turn-state') !== 'complete') return false;
-          if (submitted !== null) {
-            const bubble = turn.querySelector<HTMLElement>('[data-user-message-bubble], [data-message-author-role="user"]');
-            const normalize = (value: string) => value.replace(/\s+/g, ' ').trim();
-            if (!bubble) return false;
-            // Long messages have a localized expand affordance inside the message bubble.
-            const actual = normalize(bubble.innerText), expected = normalize(submitted);
-            if (actual !== expected && actual !== expected + ' … 展開' && actual !== expected + ' … Expand') return false;
-          }
-          // Image-only turns can lose their assistant heading when the final gallery replaces the progress UI.
-          const gallery = turn.querySelector('[data-testid="generated-image-gallery"]');
-          if (!gallery) return turn.querySelector('[data-conversation-role="assistant"]') !== null;
-          return Array.from(gallery.querySelectorAll<HTMLImageElement>('[data-testid="generated-image-preview"] img'))
-            .some(image => image.complete && image.naturalWidth > 0);
-        }, { previous: previousTurns, submitted: image ? filledText : null });
-      }, answerTimeoutMs, 'Assistant answer');
+      const replyReady = async () => !(await stopped.isVisible()) && hasCompletedReply(turns, previousTurns, image ? filledText : null);
+      await waitUntil(replyReady, answerTimeoutMs, 'Assistant answer');
       if (image) {
+        // The streamed preview can look complete before its download viewer is usable.
+        // Open the saved conversation with a GET; never submit the prompt again.
+        const saved = new URL(page.url());
+        if (saved.origin !== origin || !/^\/c\/[a-z0-9-]+$/i.test(saved.pathname)) {
+          throw new ProfileNotReadyError('Cannot identify the saved image conversation.');
+        }
+        await page.goto(origin + saved.pathname, { waitUntil: 'domcontentloaded', ...actionOptions });
+        await waitUntil(async () => {
+          if (new URL(page.url()).pathname !== saved.pathname) throw new ProfileNotReadyError('Saved conversation changed.');
+          return hasRequiredPlan() && await replyReady();
+        }, readyTimeoutMs, 'Saved image reply');
         await guard();
         if (!hasRequiredPlan()) throw new ProfileNotReadyError('Account can no longer be confirmed.');
         await image.save(turns.nth(previousTurns));

@@ -35,6 +35,11 @@ test('standalone image CLI selects one Plus profile and saves just its downloade
       const connect = chromium.connectOverCDP.bind(chromium);
       chromium.connectOverCDP = async (...args) => {
         const browser = await connect(...args);
+        if (process.env.IMAGE_FIXTURE === 'no-local-path') {
+          browser.contexts()[0].on('page', page => page.on('download', download => {
+            download.path = async () => { throw new Error('No local path for this browser download'); };
+          }));
+        }
         await serveImageFixture(browser.contexts()[0], process.env.IMAGE_FIXTURE, text => {
           appendFileSync(${JSON.stringify(submissions)}, JSON.stringify(text) + '\\n');
           if (process.env.IMAGE_FIXTURE === 'race') writeFileSync(${JSON.stringify(output)}, 'other writer', {flag:'wx'});
@@ -80,6 +85,15 @@ test('standalone image CLI selects one Plus profile and saves just its downloade
       assert.deepEqual(posted().map(line => JSON.parse(line).replace(/\s+/g, ' ')), ['Generate exactly one image from this brief: ' + brief]);
       assert.deepEqual(readdirSync(other.path), ['.gpt-usage-id']);
       assert.equal(existsSync(join(local, 'chatgpt-cli/logs')), false);
+      rmSync(output);
+    });
+
+    await t.test('transfers the original PNG even when the browser exposes no local download path', () => {
+      const before = posted().length, r = run(explicit, 'no-local-path');
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout.trimEnd(), output);
+      assert.deepEqual(readFileSync(output), Buffer.from(fixturePng, 'base64'));
+      assert.equal(posted().length, before + 1);
       rmSync(output);
     });
 
@@ -151,7 +165,7 @@ test('Plus image verifies identity and plan at click time and never replays a ti
     const origin = 'http://image-fixture.invalid';
     const references = ['locker.png', 'pouch.png'].map(file => join(dir, file));
     for (const file of references) writeFileSync(file, Buffer.from(fixturePng, 'base64'));
-    for (const mode of ['switch', 'downgrade', 'pending', 'image-refs-missing']) {
+    for (const mode of ['switch', 'downgrade', 'pending', 'image-refs-missing', 'changed-reply', 'saved-switch']) {
       const posted: string[] = [];
       const page = await edge.context.newPage();
       await serveImageFixture(edge.context, mode, text => posted.push(text), origin);
@@ -164,9 +178,10 @@ test('Plus image verifies identity and plan at click time and never replays a ti
           if (mode === 'downgrade') await Promise.all([page.waitForRequest(request => request.url().endsWith(accountCheck)),
             page.evaluate(path => { void fetch(path); }, accountCheck)]);
         },
-      }), mode === 'pending' ? /Assistant answer timed out/ : mode === 'switch' ? /Account changed/
-        : mode === 'image-refs-missing' ? /Could not confirm all reference images/ : /plan is no longer confirmed|Personal Plus/);
-      assert.equal(posted.length, mode === 'pending' ? 1 : 0);
+      }), mode === 'pending' ? /Assistant answer timed out/ : mode === 'switch' || mode === 'saved-switch' ? /Account changed/
+        : mode === 'image-refs-missing' ? /Could not confirm all reference images/
+        : mode === 'changed-reply' ? /Saved image reply timed out/ : /plan is no longer confirmed|Personal Plus/);
+      assert.equal(posted.length, ['pending', 'changed-reply', 'saved-switch'].includes(mode) ? 1 : 0);
       await edge.context.unrouteAll({ behavior: 'wait' });
       await page.close();
     }
