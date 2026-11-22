@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from 'node:path';
 import { readRegularFile } from '../storage/files.ts';
 
-export interface Profile { name: string; path: string; id?: string }
+export interface Profile { name: string; path: string; id: string }
 const identityFile = '.gpt-usage-id';
 const samePath = (a: string, b: string) => normalize(a).toLowerCase() === normalize(b).toLowerCase();
 const contains = (parent: string, child: string) => {
@@ -11,25 +11,25 @@ const contains = (parent: string, child: string) => {
   return difference === '' || (difference !== '..' && !difference.startsWith(`..${sep}`) && !isAbsolute(difference));
 };
 
-/** Explicit paths have no inventory requirement. Collection roots discover only marked direct children. */
-export function resolveProfiles(paths: string[], localAppData = process.env.LOCALAPPDATA): Profile[] {
-  if (!localAppData || !isAbsolute(localAppData)) throw new Error('LOCALAPPDATA must be an absolute directory.');
-  const profiles: Profile[] = [];
-  const normalEdge = join(localAppData, 'Microsoft', 'Edge', 'User Data');
-  for (const value of paths) {
-    if (!value || !isAbsolute(value)) throw new Error('--profile must be an absolute dedicated directory.');
-    const path = resolve(value);
-    if (contains(normalEdge, path) || contains(path, normalEdge)) {
-      throw new Error('Normal Edge user data and its parent directories cannot be used for automation.');
-    }
-    if (profiles.some(profile => contains(profile.path, path) || contains(path, profile.path))) {
-      throw new Error('Profile directories must not duplicate or overlap.');
-    }
-    assertProfileDirectory(path, false);
-    const id = readProfileId(path);
-    profiles.push({ name: basename(path), path, ...(id === undefined ? {} : { id }) });
+const absolute = (path: string) => isAbsolute(path) && parse(path).root.length > 1;
+
+function localAppData(): string {
+  const path = process.env.LOCALAPPDATA;
+  if (!path || !absolute(path)) throw new Error('LOCALAPPDATA must be an absolute directory.');
+  return resolve(path);
+}
+
+export function profileRoot(): string {
+  return join(localAppData(), 'chatgpt-cli', 'profiles');
+}
+
+export function assertDedicatedDirectory(path: string, required: boolean): void {
+  if (!absolute(path)) throw new Error('Dedicated profile directories must be absolute.');
+  const normalEdge = join(localAppData(), 'Microsoft', 'Edge', 'User Data');
+  if (contains(normalEdge, path) || contains(path, normalEdge)) {
+    throw new Error('Normal Edge user data and its parent directories cannot be used for automation.');
   }
-  return profiles;
+  assertProfileDirectory(path, required);
 }
 
 /** Reject links in every existing ancestor, including before creating a new directory. */
@@ -46,29 +46,30 @@ export function assertProfileDirectory(path: string, required: boolean): void {
     throw new Error('Profile directory and its ancestors must be regular, unlinked directories.');
   }
   if (required && !samePath(existing, path)) {
-    throw new Error('Dedicated profile is missing. Run npm run login first, then sign in.');
+    throw new Error('Dedicated profile directory is missing. Run chatgpt-cli login to create a profile.');
   }
 }
 
-export function readProfileId(path: string): string | undefined {
+function readProfileId(path: string): string | undefined {
   const value = readRegularFile(join(path, identityFile))?.trim();
   if (value !== undefined && !/^[0-9a-f]{32}$/.test(value)) throw new Error('Invalid profile identity.');
   return value;
 }
 
 export function assertIdentity(profile: Profile): void {
-  assertProfileDirectory(profile.path, true);
-  if (profile.id !== undefined && readProfileId(profile.path) !== profile.id) {
+  assertDedicatedDirectory(profile.path, true);
+  if (!profile.id || readProfileId(profile.path) !== profile.id) {
     throw new Error(`Profile identity changed: ${profile.path}`);
   }
 }
 
-export function listProfiles(root: string): Profile[] {
-  resolveProfiles([root]);
-  if (!lstatSync(root, { throwIfNoEntry: false })) return [];
+/** Only marked direct children are selectable, never arbitrary paths. */
+export function listProfiles(root: string, name?: string): Profile[] {
+  assertDedicatedDirectory(root, false);
   const profiles: Profile[] = [];
   const ids = new Set<string>();
-  for (const entry of readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+  const entries = lstatSync(root, { throwIfNoEntry: false }) ? readdirSync(root, { withFileTypes: true }) : [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (entry.name.toLowerCase() === 'archive' || (!entry.isDirectory() && !entry.isSymbolicLink())) continue;
     const path = join(root, entry.name);
     assertProfileDirectory(path, true);
@@ -78,11 +79,15 @@ export function listProfiles(root: string): Profile[] {
     ids.add(id);
     profiles.push({ name: entry.name, path, id });
   }
-  return profiles;
+  if (name === undefined) return profiles;
+  const matches = profiles.filter(profile => profile.name.toLowerCase() === name.toLowerCase());
+  if (!matches.length) throw new Error(`No profile named "${name}". Run chatgpt-cli profiles to see available names.`);
+  if (matches.length > 1) throw new Error(`Profile name "${name}" is ambiguous.`);
+  return matches;
 }
 
 export function createProfile(root: string): Profile {
-  resolveProfiles([root]);
+  assertDedicatedDirectory(root, false);
   const occupied = new Set(lstatSync(root, { throwIfNoEntry: false }) ? readdirSync(root).map(name => name.toLowerCase()) : []);
   let number = 1;
   while (occupied.has(`未ログイン-${String(number).padStart(3, '0')}`)) number++;

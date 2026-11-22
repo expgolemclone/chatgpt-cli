@@ -32,8 +32,8 @@ test('prune fails closed for linked directories, archive roots, and changed prof
 
 test('real Edge prune previews or deletes only confirmed signed-out profiles, regardless of their names', async t => {
   const temporary = mkdtempSync('C:/dev/tmp/chatgpt-prune-');
-  const localAppData = join(temporary, 'localappdata');
-  const defaultRoot = join(localAppData, 'chatgpt-cli', 'profiles');
+  const localAppData = (mode: string) => join(temporary, mode, 'localappdata');
+  const profileRoot = (mode: string) => join(localAppData(mode), 'chatgpt-cli', 'profiles');
   try {
     const preload = join(temporary, 'inspect-fixture.mjs');
     writeFileSync(preload, `
@@ -72,34 +72,32 @@ test('real Edge prune previews or deletes only confirmed signed-out profiles, re
       };
     `);
     const run = (mode: string, ...args: string[]) => spawnSync(process.execPath,
-      ['--import', pathToFileURL(preload).href, cli, 'prune', ...args], {
-        encoding: 'utf8', timeout: 60_000, env: { ...process.env, LOCALAPPDATA: localAppData, FIXTURE_MODE: mode },
+      ['--import', pathToFileURL(preload).href, cli, 'profiles', 'prune', ...args], {
+        encoding: 'utf8', timeout: 60_000, env: { ...process.env, LOCALAPPDATA: localAppData(mode), FIXTURE_MODE: mode },
       });
     await t.test('an empty collection creates nothing', () => {
       const result = run('guest', '--apply');
       assert.equal(result.status, 0, result.stdout + result.stderr);
       assert.equal(result.stdout, '');
-      assert.equal(existsSync(defaultRoot), false);
+      assert.equal(existsSync(profileRoot('guest')), false);
     });
     await t.test('preview keeps the profile and apply respects inspection cooldown', () => {
-      const profile = createProfile(defaultRoot);
+      const profile = createProfile(profileRoot('guest'));
       const result = run('guest');
       assert.equal(result.status, 0, result.stdout + result.stderr);
-      assert.deepEqual(JSON.parse(result.stdout), {
-        profile, status: 'logged_out', reason: 'login_surface_without_authenticated_identity', action: 'would-delete',
-      });
+      assert.equal(result.stdout.trim(), 'Would delete ' + profile.name + ' (login_surface_without_authenticated_identity).');
       const blocked = run('guest', '--apply');
       assert.equal(blocked.status, 1, blocked.stdout + blocked.stderr);
       assert.match(blocked.stderr, /access_cooldown/);
       assert.equal(existsSync(profile.path), true);
     });
-    for (const [mode, status, action] of [
-      ['signed-out', 'logged_out', 'deleted'],
-      ['signed-in', 'logged_in', 'keep'],
-      ['failed-identity', 'unknown', 'keep'],
+    for (const [mode, action] of [
+      ['signed-out', 'Deleted'],
+      ['signed-in', 'Kept'],
+      ['failed-identity', 'Kept'],
     ] as const) {
       await t.test(mode, () => {
-        const root = join(temporary, mode);
+        const root = profileRoot(mode);
         const profile = createProfile(root);
         if (mode === 'signed-out') {
           const name = 'expired@example.test';
@@ -113,12 +111,11 @@ test('real Edge prune previews or deletes only confirmed signed-out profiles, re
         mkdirSync(outside);
         writeFileSync(join(outside, 'keep.txt'), 'unchanged');
         symlinkSync(outside, join(profile.path, 'linked-content'), 'junction');
-        const result = run(mode, '--apply', '--profile-root', root);
+        const result = run(mode, '--apply');
         assert.equal(result.status, 0, result.stdout + result.stderr);
-        const { reason, ...details } = JSON.parse(result.stdout);
-        assert.deepEqual(details, { profile, status, action });
-        if (mode === 'failed-identity') assert.equal(reason, 'identity_response_unsettled');
-        assert.equal(existsSync(profile.path), action !== 'deleted');
+        assert.ok(result.stdout.startsWith(action + ' ' + profile.name + ' ('), result.stdout);
+        if (mode === 'failed-identity') assert.match(result.stdout, /identity_response_unsettled/);
+        assert.equal(existsSync(profile.path), action !== 'Deleted');
         assert.equal(existsSync(archived.path), true);
         assert.equal(existsSync(unmarked), true);
         assert.equal(readFileSync(join(outside, 'keep.txt'), 'utf8'), 'unchanged');

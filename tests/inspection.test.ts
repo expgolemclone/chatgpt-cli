@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { parseIdentity, parsePlan, type Account } from '../src/browser/account.ts';
 import { claimAccess, classifyProfile, inspectProfile } from '../src/browser/inspect.ts';
-import { createProfile, listProfiles, readProfileId } from '../src/browser/profiles.ts';
+import { createProfile, listProfiles } from '../src/browser/profiles.ts';
 import { challengeFixture } from './fixtures/chat.ts';
 
 const identity = { status: 200, settled: true, validJson: true, email: 'a@example.test' } as const;
@@ -59,7 +59,7 @@ test('profile collection discovers only owned direct profiles and creates comple
     assert.equal(first.name, '未ログイン-001');
     assert.equal(second.name, '未ログイン-002');
     assert.notEqual(first.id, second.id);
-    assert.equal(readProfileId(first.path), first.id);
+    assert.equal(readFileSync(join(first.path, '.gpt-usage-id'), 'utf8'), first.id);
     mkdirSync(join(root, 'archive'));
     writeFileSync(join(root, 'archive', '.gpt-usage-id'), 'invalid archive identity');
     mkdirSync(join(root, 'unmarked'));

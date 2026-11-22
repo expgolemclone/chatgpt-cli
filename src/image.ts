@@ -6,21 +6,10 @@ import type { Locator } from 'playwright';
 import { AccessBlockedError, CloudflareChallengeError, emailPattern } from './browser/account.ts';
 import { launchProfile } from './browser/edge.ts';
 import { isProfileRunning } from './browser/processes.ts';
-import { assertIdentity, listProfiles, resolveProfiles, type Profile } from './browser/profiles.ts';
+import { assertIdentity, type Profile } from './browser/profiles.ts';
 import { ProfileNotReadyError, runChat } from './chat.ts';
-import { readLedger } from './usage/ledger.ts';
 
-type Selection = { profile: string } | { root: string; ledger: string };
 class ImageError extends Error {}
-
-function selectProfile(selection: Selection): Profile {
-  if ('profile' in selection) return resolveProfiles([selection.profile])[0]!;
-  const plus = new Set(readLedger(resolve(selection.ledger)).rows.filter(row => row.kind === 'email' && row.state === 'plus')
-    .map(row => row.value.toLowerCase()));
-  const matches = listProfiles(selection.root).filter(profile => plus.has(profile.name.toLowerCase()));
-  if (matches.length !== 1) throw new ImageError(`Found ${matches.length} matching Plus profiles; specify one --profile instead of --ledger.`);
-  return matches[0]!;
-}
 
 const pngHeader = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'); // signature and IHDR
 const pngEnd = Buffer.from('0000000049454e44ae426082', 'hex'); // complete IEND
@@ -65,9 +54,9 @@ async function downloadImage(turn: Locator, output: string): Promise<void> {
   } finally { clearTimeout(timer); }
 }
 
-export async function generateImage(selection: Selection, promptFile: string, destination: string, referenceFiles: string[] = []): Promise<string> {
+export async function generateImage(profile: Profile, promptFile: string, destination: string, referenceFiles: string[] = []): Promise<string> {
   let state = 'Not sent';
-  let hint = 'Check that --prompt-file is a readable, nonempty UTF-8 file.';
+  let hint = 'Choose a readable, nonempty UTF-8 brief file.';
   try {
     const brief = new TextDecoder('utf-8', { fatal: true }).decode(await readFile(resolve(promptFile))).trim();
     if (!brief || brief.includes('\0')) throw new ImageError(hint);
@@ -78,18 +67,18 @@ export async function generateImage(selection: Selection, promptFile: string, de
       if (!/\.(png|jpe?g|webp)$/i.test(file) || !lstatSync(file, { throwIfNoEntry: false })?.isFile()) throw new ImageError(hint);
       await access(file, constants.R_OK);
     }
-    hint = 'Choose a new writable .png path for --output.';
+    hint = 'Choose a new writable .png output path.';
     const output = resolve(destination);
     if (extname(output).toLowerCase() !== '.png' || lstatSync(output, { throwIfNoEntry: false })) throw new ImageError(hint);
-    await mkdir(dirname(output), { recursive: true });
-    await access(dirname(output), constants.W_OK);
-    hint = 'Check the dedicated profile selection or the private ledger; use image --help.';
-    const profile = selectProfile(selection);
+    hint = 'Check the selected profile with chatgpt-cli profiles.';
     assertIdentity(profile);
     if (!lstatSync(join(profile.path, 'Local State'), { throwIfNoEntry: false })?.isFile()) {
-      throw new ImageError('Select an existing dedicated Edge user-data directory where you already signed in.');
+      throw new ImageError('Sign in first with chatgpt-cli login --profile NAME, then close Edge.');
     }
     if (isProfileRunning(profile)) throw new ImageError('Close the selected dedicated Edge profile before running image.');
+    hint = 'Choose a new writable .png output path.';
+    await mkdir(dirname(output), { recursive: true });
+    await access(dirname(output), constants.W_OK);
     hint = 'Check that the dedicated Edge profile is closed and available to the current user.';
     const artifacts = await mkdtemp(resolve('C:/dev/tmp/chatgpt-image-'));
     try {
@@ -113,7 +102,7 @@ export async function generateImage(selection: Selection, promptFile: string, de
   } catch (error) {
     // Do not print browser call logs, ledger rows, signed URLs or prompt contents.
     const reason = state === 'Not sent' && error instanceof CloudflareChallengeError
-      ? 'Cloudflare verification did not clear. Check ChatGPT in Edge, or replace the profile selection options with --profile DIR to use another signed-in Plus profile that already has normal access.'
+      ? 'Cloudflare verification did not clear. Check ChatGPT in Edge, or use --profile NAME for another signed-in Plus profile that already has normal access.'
       : error instanceof AccessBlockedError ? 'Access is restricted; check ChatGPT manually.'
       : error instanceof ImageError || error instanceof ProfileNotReadyError ? error.message : hint;
     throw new Error(`${state}: ${reason}${state === 'Sent' || state === 'Submission unconfirmed' ? ' Check chat history before retrying.' : ''}`, { cause: error });

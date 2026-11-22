@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { createProfile } from '../src/browser/profiles.ts';
 
 const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const lock = new URL('../src/send-lock.ts', import.meta.url).href;
@@ -13,7 +14,8 @@ const preload = new URL('./fixtures/send-lock.mjs', import.meta.url).href;
 test('send is exclusive across processes and recovers when its owner is killed', async () => {
   const temporary = mkdtempSync('C:/dev/tmp/chatgpt-send-lock-');
   const localAppData = join(temporary, 'localappdata');
-  const profile = join(temporary, 'profile');
+  const profile = createProfile(join(localAppData, 'chatgpt-cli', 'profiles'));
+  const logs = join(localAppData, 'chatgpt-cli', 'logs');
   const env = { ...process.env, LOCALAPPDATA: localAppData };
   const holder = spawn(process.execPath, ['--import', preload, '--input-type=module', '-e', `
     import { acquireSendLock } from ${JSON.stringify(lock)};
@@ -35,19 +37,20 @@ test('send is exclusive across processes and recovers when its owner is killed',
     ]);
     assert.equal(result, 'locked');
 
-    const send = spawnSync(process.execPath, ['--import', preload, cli, 'send', '--profile', profile], {
-      encoding: 'utf8', timeout: 10_000, env,
-    });
-    assert.equal(send.status, 1, send.stdout + send.stderr);
-    assert.match(send.stderr, /Another chatgpt-cli send is already running/);
-    assert.equal(existsSync(localAppData), false, 'a rejected send creates no state');
-    assert.equal(existsSync(profile), false, 'a rejected send does not touch profiles');
+    for (const args of [['send'], ['image', 'brief.txt', 'new.png', '--profile', profile.name]]) {
+      const blocked = spawnSync(process.execPath, ['--import', preload, cli, ...args], {
+        encoding: 'utf8', timeout: 10_000, env,
+      });
+      assert.equal(blocked.status, 1, blocked.stdout + blocked.stderr);
+      assert.match(blocked.stderr, /Another chatgpt-cli send is already running/);
+    }
 
-    const preview = spawnSync(process.execPath, ['--import', preload, cli, 'send', '--profile', profile, '--dry-run'], {
+    const preview = spawnSync(process.execPath, ['--import', preload, cli, 'send', '--dry-run'], {
       encoding: 'utf8', timeout: 10_000, env,
     });
     assert.equal(preview.status, 0, preview.stdout + preview.stderr);
-    assert.equal(existsSync(localAppData), false, 'preview remains read-only');
+    assert.equal(existsSync(logs), false, 'a rejected send and preview create no logs');
+    assert.deepEqual(readdirSync(profile.path), ['.gpt-usage-id']);
 
     assert.equal(holder.kill(), true);
     await once(holder, 'exit');

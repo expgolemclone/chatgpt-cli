@@ -88,7 +88,7 @@ for (const exits of [true, false]) {
 }
 
 test('all browser entrypoints use installed Edge directly, never a Playwright browser launcher', () => {
-  for (const path of ['src/main.ts','src/browser/edge.ts','src/browser/inspect.ts']) {
+  for (const path of ['src/main.ts', 'src/send.ts', 'src/image.ts', 'src/browser/edge.ts', 'src/browser/inspect.ts']) {
     const text = readFileSync(new URL('../' + path, import.meta.url), 'utf8');
     assert.doesNotMatch(text, /launchPersistentContext|chromium\.launch\s*\(/);
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -16,7 +16,7 @@ import { sendPacingFixture } from './fixtures/send-pacing.ts';
 const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const execute = promisify(execFile);
 
-for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked' : 'explicit unmarked'} profile, retains its data, and leaves another browser alive`, async () => {
+test('send closes only the named Edge profile, retaining its data and leaving other profiles alive', async () => {
   const temporary = mkdtempSync('C:/dev/tmp/chatgpt-send-restart-');
   const observed: string[] = [];
   const server = createServer((request, response) => {
@@ -29,17 +29,16 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     }
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const localAppData = join(temporary, "local app data 日本語's");
   const ownedProfiles: Profile[] = [];
   let other: Awaited<ReturnType<typeof launchProfile>> | undefined;
   try {
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
     const origin = `http://127.0.0.1:${address.port}/`;
-    const root = join(temporary, "dedicated profiles 日本語's");
-    const created = createProfile(root);
+    const root = join(localAppData, 'chatgpt-cli', 'profiles');
+    const selected = createProfile(root);
     const untouched = createProfile(root);
-    if (!marked) unlinkSync(join(created.path, '.gpt-usage-id'));
-    const selected = marked ? created : { name: created.name, path: created.path };
     ownedProfiles.push(selected, untouched);
     const seeded = await launchProfile(selected);
     try {
@@ -59,12 +58,11 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     const manual = join(temporary, 'manual.mjs');
     writeFileSync(manual, manualPreload);
     const opened = await execute(process.execPath,
-      ['--import', pathToFileURL(manual).href, cli, 'open', '--profile', selected.path], {
+      ['--import', pathToFileURL(manual).href, cli, 'open', '--profile', selected.name], {
         encoding: 'utf8', timeout: 20_000, env: { ...process.env,
-          LOCALAPPDATA: join(temporary, 'localappdata'), FIXTURE_URL: origin,
-          FIXTURE_LAUNCHES: launches, FIXTURE_PADDING: '1' },
+          LOCALAPPDATA: localAppData, FIXTURE_URL: origin, FIXTURE_LAUNCHES: launches, FIXTURE_PADDING: '1' },
       });
-    assert.match(opened.stdout, /"profile-opened"/);
+    assert.equal(opened.stdout.trim(), 'Opened ' + selected.name + '.');
     const ordinaryPid: number = JSON.parse(readFileSync(launches, 'utf8').trim().split('\n').at(-1)!).pid;
     const deadline = Date.now() + 15_000;
     while (!observed.includes('retained-storage') && Date.now() < deadline) await setTimeout(100);
@@ -72,11 +70,11 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     assert.equal(existsSync(join(selected.path, 'DevToolsActivePort')), false);
     // The preload puts 900 characters before user-data-dir. Selection must use its full native command line.
     const run = (...args: string[]) => execute(process.execPath, [cli, ...args], {
-      encoding: 'utf8', timeout: 20_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
+      encoding: 'utf8', timeout: 20_000, env: { ...process.env, LOCALAPPDATA: localAppData },
     });
-    const before = JSON.parse((await run('send', '--profile', selected.path,
+    const before = JSON.parse((await run('send', '--profile', selected.name,
       '--seed', 'restart-fixture', '--dry-run')).stdout);
-    await assert.rejects(run('send', '--profile', selected.path, '--questions', '5'), /Unknown option/);
+    await assert.rejects(run('send', '--profile', selected.name, '--questions', '5'), /Unknown option/);
     assert.doesNotThrow(() => process.kill(ordinaryPid, 0), 'Read-only and invalid invocations never kill Edge.');
     const denied = join(temporary, 'deny-termination.mjs');
     writeFileSync(denied, `
@@ -95,8 +93,8 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
       };
     `);
     await assert.rejects(execute(process.execPath, ['--import', pathToFileURL(denied).href,
-      cli, 'send', '--profile', selected.path], {
-      encoding: 'utf8', timeout: 20_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
+      cli, 'send', '--profile', selected.name], {
+      encoding: 'utf8', timeout: 20_000, env: { ...process.env, LOCALAPPDATA: localAppData },
     }), /Cannot terminate the selected Edge profile/);
     assert.doesNotThrow(() => process.kill(ordinaryPid, 0), 'A denied termination never launches automation.');
 
@@ -146,10 +144,12 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
       };
     `);
     const sent = await execute(process.execPath, ['--import', pathToFileURL(preload).href,
-      cli, 'send', '--profile', selected.path, '--seed', 'restart-fixture'], {
-      encoding: 'utf8', timeout: 90_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
+      cli, 'send', '--profile', selected.name, '--seed', 'restart-fixture'], {
+      encoding: 'utf8', timeout: 90_000, env: { ...process.env, LOCALAPPDATA: localAppData },
     });
-    const records = sent.stdout.trim().split('\n').map(line => JSON.parse(line));
+    assert.match(sent.stdout, /Send complete\. Log:/);
+    assert.match(sent.stderr, /Warning: send closes open Edge windows in the selected dedicated profiles/);
+    const records = sent.stdout.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line));
     assert.ok(records.some(record => record.event === 'profile-terminated' && record.pid === ordinaryPid));
     assert.equal(records.filter(record => record.event === 'fixture-endpoint-busy').length, 2);
     assert.equal(records.filter(record => record.event === 'fixture-submitted').length, 25);
@@ -159,13 +159,12 @@ for (const marked of [true, false]) test(`send kills an open ${marked ? 'marked'
     assert.equal(records.filter(record => record.event === 'profile-completed').length, 1);
     assert.deepEqual(records.filter(record => record.event === 'sending').map(record => record.promptId),
       before.profiles[0].sessions.flat().map((prompt: { id: string }) => prompt.id));
-    const after = JSON.parse((await run('send', '--profile', selected.path,
+    const after = JSON.parse((await run('send', '--profile', selected.name,
       '--seed', 'restart-fixture', '--dry-run')).stdout);
     assert.notEqual(after.profiles[0].sessions[0][0].id, before.profiles[0].sessions[0][0].id);
     assert.equal(records.at(-1).success, true);
     assert.throws(() => process.kill(ordinaryPid, 0), 'The pre-existing selected browser was terminated.');
-    if (marked) assert.equal(readFileSync(join(selected.path, '.gpt-usage-id'), 'utf8'), created.id);
-    else assert.equal(existsSync(join(selected.path, '.gpt-usage-id')), false);
+    assert.equal(readFileSync(join(selected.path, '.gpt-usage-id'), 'utf8'), selected.id);
     assert.equal(readFileSync(join(untouched.path, '.gpt-usage-id'), 'utf8'), untouched.id);
     assert.equal(await otherPage.title(), 'Keep this other profile open', `Other page URL: ${otherPage.url()}`);
     assert.equal(existsSync(join(untouched.path, 'DevToolsActivePort')), true);

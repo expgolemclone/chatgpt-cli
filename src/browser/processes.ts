@@ -2,7 +2,7 @@ import koffi from 'koffi';
 import { isAbsolute, parse, resolve } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { edgeExecutable } from './edge.ts';
-import { assertIdentity, resolveProfiles, type Profile } from './profiles.ts';
+import { assertIdentity, type Profile } from './profiles.ts';
 
 const kernel = koffi.load('kernel32.dll');
 const shell = koffi.load('shell32.dll');
@@ -92,7 +92,6 @@ export function isProfileRunning(profile: Profile): boolean {
 /** Terminate only validated selected profiles, holding process handles so PID reuse cannot target another process. */
 export async function terminateProfiles(profiles: Profile[]): Promise<{ profile: Profile; pid: number }[]> {
   if (!profiles.length) return [];
-  resolveProfiles(profiles.map(profile => profile.path));
   for (const profile of profiles) assertIdentity(profile);
   const targets: { profile: Profile; pid: number; handle: number | bigint }[] = [];
   try {

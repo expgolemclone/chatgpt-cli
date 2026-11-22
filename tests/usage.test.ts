@@ -18,19 +18,19 @@ const unknown = () => inspection(null, '不明', 'unknown', 'fixture');
 
 function fixture() {
   const temporary = mkdtempSync('C:/dev/tmp/chatgpt-usage-test-');
-  const root = join(temporary, 'profiles');
+  const localAppData = join(temporary, 'localappdata');
+  const root = join(localAppData, 'chatgpt-cli', 'profiles');
   const ledger = join(temporary, 'private-data', 'ledger.csv');
   mkdirSync(join(temporary, 'private-data'));
   writeFileSync(ledger, fixtureCsv);
   const profiles = [createProfile(root), createProfile(root)];
   for (const profile of profiles) writeFileSync(join(profile.path, 'cookies.txt'), 'existing browser data');
-  return { temporary, root, ledger, profiles, dispose: () => rmSync(temporary, { recursive: true, force: true }) };
+  return { temporary, localAppData, root, ledger, profiles, dispose: () => rmSync(temporary, { recursive: true, force: true }) };
 }
 
-const run = (temporary: string, args: string[], preload?: string) => spawnSync(process.execPath,
+const run = (localAppData: string, args: string[], preload?: string) => spawnSync(process.execPath,
   [...(preload ? ['--import', pathToFileURL(preload).href] : []), cli, ...args], {
-    encoding: 'utf8', timeout: 60_000,
-    env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
+    encoding: 'utf8', timeout: 60_000, env: { ...process.env, LOCALAPPDATA: localAppData },
   });
 
 test('standard CSV parsing preserves unrelated quoted and multiline fields and validates the email inventory', () => {
@@ -73,7 +73,7 @@ test('confirmed identity updates only its email row and moves browser data witho
   try {
     const first = f.profiles[0]!;
     const second = f.profiles[1]!;
-    const results = await syncUsage({ profile: first.path }, f.ledger, async () => inspection());
+    const results = await syncUsage(f.root, f.ledger, first.name, async () => inspection());
     assert.equal(results[0]!.updated, true);
     assert.equal(results[0]!.renamed, true);
     const renamed = join(f.root, 'a@example.test');
@@ -87,11 +87,11 @@ test('confirmed identity updates only its email row and moves browser data witho
       { kind: 'email', value: 'a@example.test', state: 'plus' },
       ...readLedgerFromFixture().slice(1),
     ]);
-    await syncUsage({ profile: second.path }, f.ledger, async () => inspection('b@example.test', '無料'));
+    await syncUsage(f.root, f.ledger, second.name, async () => inspection('b@example.test', '無料'));
     assert.equal(readLedger(f.ledger).rows.at(-1)!.value, 'b@example.test');
     assert.equal(readFileSync(join(f.root, 'b@example.test', 'cookies.txt'), 'utf8'), 'existing browser data');
     const before = readFileSync(f.ledger, 'utf8');
-    const unchanged = await syncUsage({ profile: renamed }, f.ledger, async () => inspection());
+    const unchanged = await syncUsage(f.root, f.ledger, 'a@example.test', async () => inspection());
     assert.equal(unchanged[0]!.updated, false);
     assert.equal(unchanged[0]!.renamed, false);
     assert.equal(readFileSync(f.ledger, 'utf8'), before);
@@ -112,11 +112,11 @@ test('logged-out and unknown profiles never rewrite inferred plans, and unconfir
   try {
     const first = f.profiles[0]!;
     for (const status of ['logged_out', 'unknown'] as const) {
-      await syncUsage({ profile: first.path }, f.ledger, async () => inspection(null, '不明', status));
+      await syncUsage(f.root, f.ledger, first.name, async () => inspection(null, '不明', status));
       assert.equal(readFileSync(f.ledger, 'utf8'), fixtureCsv);
       assert.equal(existsSync(first.path), true);
     }
-    await syncUsage({ profile: first.path }, f.ledger, async () => inspection('a@example.test', '不明'));
+    await syncUsage(f.root, f.ledger, first.name, async () => inspection('a@example.test', '不明'));
     assert.equal(readLedger(f.ledger).rows[0]!.state, '不明');
     assert.equal(readLedger(f.ledger).rows[1]!.state, '不明');
     assert.equal(existsSync(join(f.root, 'a@example.test')), true);
@@ -132,7 +132,7 @@ test('collisions, invalid inspections, duplicate emails, and changed identities 
       if (scenario === 'collision') mkdirSync(join(f.root, 'a@example.test'));
       if (scenario === 'duplicate') writeFileSync(f.ledger, fixtureCsv + 'email,A@example.test,plus\n');
       const before = readFileSync(f.ledger, 'utf8');
-      await assert.rejects(syncUsage({ profile: first.path }, f.ledger, async () => {
+      await assert.rejects(syncUsage(f.root, f.ledger, first.name, async () => {
         if (scenario === 'identity') writeFileSync(join(first.path, '.gpt-usage-id'), '0'.repeat(32));
         if (scenario === 'invalid-state') return { ...inspection(), state: 'pro' } as unknown as Inspection;
         if (scenario === 'invalid-status') return { ...inspection(), status: 'invalid' } as unknown as Inspection;
@@ -149,7 +149,7 @@ test('access rejection and cooldown stop the whole collection without retrying o
     const f = fixture();
     try {
       const calls: string[] = [];
-      await assert.rejects(syncUsage({ root: f.root }, f.ledger, async profile => {
+      await assert.rejects(syncUsage(f.root, f.ledger, undefined, async profile => {
         calls.push(profile.path);
         return { ...unknown(), reason };
       }), /Remaining profiles were not contacted/);
@@ -166,28 +166,28 @@ test('profile and ledger locks exclude other CLI processes and release after ins
   let entered!: () => void;
   const waiting = new Promise<void>(resolve => { resume = resolve; });
   const started = new Promise<void>(resolve => { entered = resolve; });
-  const first = syncUsage({ profile: f.profiles[0]!.path }, f.ledger, async () => {
+  const first = syncUsage(f.root, f.ledger, f.profiles[0]!.name, async () => {
     entered();
     await waiting;
     throw new Error('fixture inspection failure');
   });
   try {
     await started;
-    const otherRoot = join(f.temporary, 'other-pc');
-    createProfile(otherRoot);
-    for (const args of [
-      ['sync', '--profile-root', f.root, '--ledger', f.ledger],
-      ['sync', '--profile-root', otherRoot, '--ledger', f.ledger],
-      ['prune', '--profile-root', f.root, '--apply'],
+    const otherLocal = join(f.temporary, 'other-pc');
+    createProfile(join(otherLocal, 'chatgpt-cli', 'profiles'));
+    for (const [local, ...args] of [
+      [f.localAppData, 'profiles', 'sync', f.ledger],
+      [otherLocal, 'profiles', 'sync', f.ledger],
+      [f.localAppData, 'profiles', 'prune', '--apply'],
     ]) {
-      const child = run(f.temporary, args);
+      const child = run(local!, args);
       assert.equal(child.error, undefined);
       assert.equal(child.status, 1, child.stdout + child.stderr);
       assert.match(child.stderr, /already being held/);
     }
     resume();
     await assert.rejects(first, /fixture inspection failure/);
-    const next = await syncUsage({ profile: f.profiles[0]!.path }, f.ledger, async () => unknown());
+    const next = await syncUsage(f.root, f.ledger, f.profiles[0]!.name, async () => unknown());
     assert.equal(next.length, 1);
   } finally {
     resume();
@@ -200,7 +200,7 @@ test('collection inspections remain sequential with thirty seconds after the pre
   const f = fixture();
   try {
     const times: number[] = [];
-    const results = await syncUsage({ root: f.root }, f.ledger, async () => {
+    const results = await syncUsage(f.root, f.ledger, undefined, async () => {
       times.push(Date.now());
       return unknown();
     });
@@ -215,16 +215,11 @@ test('sync requires a ledger and validates selections without creating profiles 
   try {
     const missing = join(f.temporary, 'missing');
     for (const args of [
-      ['sync'], ['sync', '--ledger', f.ledger],
-      ['sync', '--profile-root', f.root], ['sync', '--profile-root', f.root, '--ledger', ''],
-      ['sync', '--profile', f.profiles[0]!.path, '--profile', f.profiles[1]!.path, '--ledger', f.ledger],
-      ['sync', '--profile-root', f.root, '--profile', f.profiles[0]!.path, '--ledger', f.ledger],
-      ['sync', '--profile', missing, '--ledger', f.ledger],
-      ['sync', '--profile-root', f.root, '--ledger', f.ledger, '--dry-run'],
-      ['open', '--ledger', f.ledger], ['inspect', '--profile', f.profiles[0]!.path, '--ledger', f.ledger],
-      ['send', '--dry-run', '--ledger', f.ledger],
+      ['profiles', 'sync'], ['profiles', 'sync', '--ledger', f.ledger],
+      ['profiles', 'sync', ''], ['profiles', 'sync', f.ledger, '--dry-run'],
+      ['profiles', 'sync', f.ledger, '--profile', missing], ['open', f.ledger],
     ]) {
-      const result = run(f.temporary, args);
+      const result = run(f.localAppData, args);
       assert.equal(result.error, undefined);
       assert.equal(result.status, 1, JSON.stringify(args) + result.stdout + result.stderr);
       assert.equal(readFileSync(f.ledger, 'utf8'), fixtureCsv);
@@ -232,13 +227,12 @@ test('sync requires a ledger and validates selections without creating profiles 
     }
     const empty = join(f.temporary, 'empty');
     mkdirSync(empty);
-    assert.deepEqual(await syncUsage({ root: empty }, f.ledger), []);
-    const unmarked = join(empty, 'unmarked');
-    mkdirSync(unmarked);
-    await assert.rejects(syncUsage({ profile: unmarked }, f.ledger), /marked profile/);
+    assert.deepEqual(await syncUsage(empty, f.ledger), []);
+    mkdirSync(join(empty, 'unmarked'));
+    await assert.rejects(syncUsage(empty, f.ledger, 'unmarked'), /No profile named/);
     const unsafeLedger = join(f.root, 'ledger.csv');
     writeFileSync(unsafeLedger, fixtureCsv);
-    await assert.rejects(syncUsage({ root: f.root }, unsafeLedger), /outside/);
+    await assert.rejects(syncUsage(f.root, unsafeLedger), /outside/);
   } finally { f.dispose(); }
 });
 
@@ -271,34 +265,33 @@ test('real standalone CLI inspects without renaming and syncs only after ordinar
         return browser;
       };
     `);
-    const inspected = run(f.temporary, ['inspect', '--profile', f.profiles[0]!.path], preload);
+    const inspected = run(f.localAppData, ['profiles', 'check', '--profile', f.profiles[0]!.name], preload);
     assert.equal(inspected.error, undefined, inspected.stdout + inspected.stderr);
     assert.equal(inspected.status, 0, inspected.stdout + inspected.stderr);
-    assert.equal(JSON.parse(inspected.stdout).state, 'plus', inspected.stdout + inspected.stderr);
+    assert.match(inspected.stdout, /Signed in as a@example\.test \(Plus\)/);
     assert.equal(inspected.stdout.includes('SECRET'), false);
     assert.equal(existsSync(f.profiles[0]!.path), true);
     assert.equal(readFileSync(f.ledger, 'utf8'), fixtureCsv);
-    const synced = run(f.temporary, ['sync', '--profile', f.profiles[1]!.path, '--ledger', f.ledger], preload);
+    const synced = run(f.localAppData, ['profiles', 'sync', f.ledger, '--profile', f.profiles[1]!.name], preload);
     assert.equal(synced.error, undefined, synced.stdout + synced.stderr);
     assert.equal(synced.status, 0, synced.stdout + synced.stderr);
     assert.equal(synced.stdout.includes('SECRET'), false);
-    assert.equal(JSON.parse(synced.stdout).results[0].state, 'plus', synced.stdout + synced.stderr);
+    assert.match(synced.stdout, /Signed in as a@example\.test \(Plus\)\. Ledger updated\. Profile renamed\./);
     assert.equal(readLedger(f.ledger).rows[0]!.state, 'plus');
     const renamed = join(f.root, 'a@example.test');
     assert.equal(readFileSync(join(renamed, '.gpt-usage-id'), 'utf8'), f.profiles[1]!.id);
     assert.equal(readFileSync(join(renamed, 'cookies.txt'), 'utf8'), 'existing browser data');
     assert.equal(existsSync(join(renamed, '.gpt-usage-access.json')), true);
-    const defaultRoot = join(f.temporary, 'localappdata', 'chatgpt-cli', 'profiles');
+    const otherLocal = join(f.temporary, 'other-localappdata');
+    const defaultRoot = join(otherLocal, 'chatgpt-cli', 'profiles');
     const defaultProfile = createProfile(defaultRoot);
     writeFileSync(join(defaultProfile.path, 'cookies.txt'), 'default browser data');
-    const defaultSynced = run(f.temporary, ['sync', '--ledger', f.ledger], preload);
+    const defaultSynced = run(otherLocal, ['profiles', 'sync', f.ledger], preload);
     assert.equal(defaultSynced.error, undefined, defaultSynced.stdout + defaultSynced.stderr);
     assert.equal(defaultSynced.status, 0, defaultSynced.stdout + defaultSynced.stderr);
-    const defaultResults = JSON.parse(defaultSynced.stdout).results;
-    assert.equal(defaultResults.length, 1);
-    assert.equal(defaultResults[0].state, 'plus', defaultSynced.stdout + defaultSynced.stderr);
-    assert.equal(defaultResults[0].profile.path, join(defaultRoot, 'a@example.test'));
-    assert.equal(defaultResults[0].profile.id, defaultProfile.id);
+    assert.match(defaultSynced.stdout, /Signed in as a@example\.test \(Plus\)\. Profile renamed\./);
+    assert.deepEqual(listProfiles(defaultRoot).map(profile => [profile.path, profile.id]),
+      [[join(defaultRoot, 'a@example.test'), defaultProfile.id]]);
     assert.equal(readFileSync(join(defaultRoot, 'a@example.test', 'cookies.txt'), 'utf8'), 'default browser data');
     assert.equal(readFileSync(closed, 'utf8'), 'closed\nclosed\nclosed\n');
     assert.equal(existsSync(f.profiles[0]!.path), true);

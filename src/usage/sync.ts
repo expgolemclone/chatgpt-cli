@@ -1,22 +1,16 @@
 import { lstatSync, renameSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { emailPattern } from '../browser/account.ts';
 import { inspectProfile, inspectProfiles, type Inspection } from '../browser/inspect.ts';
-import { assertIdentity, assertProfileDirectory, listProfiles, resolveProfiles, type Profile } from '../browser/profiles.ts';
+import { assertDedicatedDirectory, assertIdentity, listProfiles, type Profile } from '../browser/profiles.ts';
 import { acquirePathLock } from '../storage/lock.ts';
 import { readLedger, writeLedger } from './ledger.ts';
 
-export interface SyncSelection { root?: string; profile?: string }
 export interface SyncResult extends Inspection { profile: Profile; updated: boolean; renamed: boolean }
 
-export async function syncUsage(selection: SyncSelection, ledgerPath: string,
+export async function syncUsage(root: string, ledgerPath: string, profileName?: string,
   inspect: (profile: Profile) => Promise<Inspection> = inspectProfile): Promise<SyncResult[]> {
-  if ((selection.root === undefined) === (selection.profile === undefined)) {
-    throw new Error('sync requires --profile-root or exactly one --profile.');
-  }
-  const target = resolveProfiles([selection.root ?? selection.profile!])[0]!;
-  const root = selection.root === undefined ? dirname(target.path) : target.path;
-  assertProfileDirectory(root, true);
+  assertDedicatedDirectory(root, true);
   const ledgerFile = resolve(ledgerPath);
   const difference = relative(root.toLowerCase(), ledgerFile.toLowerCase());
   if (difference === '' || (difference !== '..' && !difference.startsWith('..' + sep) && !isAbsolute(difference))) {
@@ -27,7 +21,7 @@ export async function syncUsage(selection: SyncSelection, ledgerPath: string,
   try {
     for (const path of [root, ledgerFile].sort()) releases.push(await acquirePathLock(path));
     const ledger = readLedger(ledgerFile);
-    const profiles = selection.root === undefined ? resolveProfiles([target.path]) : listProfiles(root);
+    const profiles = listProfiles(root, profileName);
     const results: SyncResult[] = [];
     for await (const { profile, inspection } of inspectProfiles(profiles, inspect)) {
       const result: SyncResult = { ...inspection, profile, updated: false, renamed: false };

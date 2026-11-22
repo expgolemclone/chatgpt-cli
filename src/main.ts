@@ -1,245 +1,226 @@
-import { randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync } from 'node:fs';
-import { join, normalize, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { setTimeout } from 'node:timers/promises';
-import { parseArgs } from 'node:util';
-import { NonFreeAccountError, runChat } from './chat.ts';
-import { AccessBlockedError } from './browser/account.ts';
-import { assertStandardUser, launchProfile, openProfile } from './browser/edge.ts';
-import { inspectProfile } from './browser/inspect.ts';
-import { assertProfileDirectory, createProfile, listProfiles, resolveProfiles } from './browser/profiles.ts';
-import { readPromptHistory } from './prompts/history.ts';
-import { syncUsage } from './usage/sync.ts';
+#!/usr/bin/env node
+import { parseArgs, type ParseArgsOptionDescriptor } from 'node:util';
+import { assertStandardUser, openProfile } from './browser/edge.ts';
+import type { Inspection } from './browser/inspect.ts';
+import { createProfile, listProfiles, profileRoot } from './browser/profiles.ts';
 
-const sessionCount = 5;
-const roundsPerSession = 5;
+const flags = {
+  profile: { type: 'string', metavar: 'NAME', description: 'Use one name from chatgpt-cli profiles.' },
+  'dry-run': { type: 'boolean', description: 'Print the planned prompts and seed without opening Edge or writing files.' },
+  seed: { type: 'string', metavar: 'TEXT', description: 'Reproduce a preview while profiles and send history are unchanged.' },
+  apply: { type: 'boolean', description: 'Permanently delete confirmed signed-out profiles.' },
+  reference: { type: 'string', multiple: true, metavar: 'IMAGE', description: 'Attach a local PNG, JPEG, or WebP. Repeat for more images.' },
+  help: { type: 'boolean', short: 'h', description: 'Show this help.' },
+} as const;
 
-const imageHelp = `Usage: node src/main.ts image --prompt-file FILE --output NEW.png [--reference IMAGE ...] (--ledger CSV [--profile-root DIR] | --profile DIR)
-Send one image request with a signed-in personal Plus account in a closed dedicated Edge profile.
-Repeat --reference to attach local PNG, JPEG, or WebP images to the brief.
---ledger selects one matching owned profile without writing the CSV. --profile is an absolute dedicated directory.
-Use a non-elevated Windows terminal. File paths are relative to your current directory. Success prints only the PNG path.`;
+type Option = ParseArgsOptionDescriptor & { description: string; metavar?: string };
+type Values = {
+  [K in keyof typeof flags]?: (typeof flags)[K] extends { type: 'boolean' } ? boolean
+    : (typeof flags)[K] extends { multiple: true } ? string[] : string;
+};
+interface Command {
+  description: string;
+  options?: Record<string, Option>;
+  args?: string[];
+  requireProfile?: boolean;
+  subcommands?: Record<string, Command>;
+  notes?: string;
+  run: (root: string, values: Values, args: string[]) => void | Promise<void>;
+}
 
-const help = `chatgpt-cli
-Usage: node src/main.ts <login|open|profiles|inspect|sync|prune|send|image> [options]
+const noProfiles = 'No dedicated profiles. Run chatgpt-cli login to create one.';
 
-  login              Open one dedicated Edge profile for manual ChatGPT login.
-                     Without --profile, create exactly one fresh marked profile.
-  open               Open existing profiles at ChatGPT Usage without checking login.
-  login/open use ordinary installed Edge directly, without Playwright or debugging.
-  profiles           List owned direct profiles as JSON.
-  inspect            Confirm email and personal plan as JSON. Requires one --profile.
-                     Never sends prompts or renames profiles.
-  sync               Update an explicit ledger CSV and rename confirmed profiles.
-                     Requires --ledger. Uses the selected profile or collection.
-                     Keeps other ledger rows and never sends prompts.
-  prune              Preview removal of signed-out profiles as JSON lines.
-                     Close dedicated Edge windows before running. Use --apply to delete.
-                     A preview also starts the normal five-minute inspection cooldown.
-  image              Generate one PNG using a signed-in Plus profile. See image --help.
-  send               Terminate selected profiles' running Edge processes, then visit
-                     signed-in free accounts in order for 5 loops. Each visit starts
-                     one fresh conversation with 5 prompt/answer rounds (25 per account).
-                     Only one profile is open at a time, with at least 30 seconds
-                     between submissions, including account and loop boundaries.
+function describeInspection(inspection: Inspection): string {
+  if (inspection.status === 'logged_out') return 'Signed out.';
+  if (inspection.status === 'unknown') return `Could not confirm sign-in (${inspection.reason}).`;
+  const plan = inspection.state === 'plus' ? 'Plus' : inspection.state === '無料' ? 'Free' : 'unknown plan';
+  return `Signed in as ${inspection.email_address} (${plan}).`;
+}
 
-  --profile PATH     Absolute dedicated user-data directory. Repeat for open/send.
-  --profile-root PATH  Collection of marked profiles, excluding archive.
-                       Default: %LOCALAPPDATA%/chatgpt-cli/profiles
-                       Cannot be combined with --profile.
-  --ledger PATH      Existing private CSV with kind,value,state columns. Read-only for image.
-  --apply            Permanently delete confirmed signed-out local profiles. Prune only.
-  --seed TEXT        Reproduce a selection with unchanged profiles and prompt logs.
-  --dry-run          Preview prompts without opening Edge or writing files. Send only.
-  --help             Show this help.
-
-Use a non-elevated Windows terminal for inspect, sync, prune, and live sends.
-Requires Windows, Node.js, and Microsoft Edge. No PowerShell 7 or other project
-is needed. Send force-closes only selected dedicated Edge profiles; unsaved drafts
-may be lost. Other commands never terminate existing browser windows. Cloudflare
-challenges wait up to 2 minutes without interacting with verification controls.
-Five consecutive Cloudflare challenge responses stop the whole batch; the count
-resets when access clears. HTTP blocks, usage limits, and other unresolved
-challenges also stop the batch. A failed session, including a manual-login request
-or an unconfirmed answer, stops further submissions in that invocation. After a
-partial send, unattended or collection-wide replays are refused before opening Edge.
-Prompt selection reads previous sending events from the local logs. Simultaneous
-send commands are rejected, and removing logs removes their prompt history.
-This tool does not create accounts or upgrade their plans.
-`;
-
-async function main(): Promise<void> {
-  const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    profile: { type: 'string', multiple: true }, 'profile-root': { type: 'string' },
-    'prompt-file': { type: 'string' }, output: { type: 'string' }, reference: { type: 'string', multiple: true },
-    seed: { type: 'string' }, ledger: { type: 'string' }, apply: { type: 'boolean', default: false },
-    'dry-run': { type: 'boolean', default: false }, help: { type: 'boolean', default: false },
-  } });
-  const command = positionals[0];
-  if (values.help || !command) { console.log(command === 'image' ? imageHelp : help); return; }
-  const image = command === 'image';
-  if (positionals.length !== 1 || !['login', 'open', 'profiles', 'inspect', 'sync', 'prune', 'send', 'image'].includes(command)) {
-    throw new Error('Unknown command. Use --help for usage.');
-  }
-  if (!image && (values['prompt-file'] !== undefined || values.output !== undefined || values.reference !== undefined)) {
-    throw new Error('Image options require image.');
-  }
-  if (values.ledger !== undefined && command !== 'sync' && !image) throw new Error('--ledger requires sync or image.');
-  if (values.apply && command !== 'prune') throw new Error('--apply is only allowed for prune.');
-  if (process.platform !== 'win32') throw new Error('This command requires Windows and Microsoft Edge.');
-  const login = command === 'login';
-  if (command !== 'send' && (values.seed !== undefined || values['dry-run'])) {
-    throw new Error('Send options are not allowed for this command.');
-  }
-  if (values['profile-root'] !== undefined && values.profile !== undefined) {
-    throw new Error('Choose --profile-root or --profile, not both.');
-  }
-  if ((command === 'profiles' || command === 'prune') && values.profile !== undefined) {
-    throw new Error(`${command} does not accept --profile; use --profile-root.`);
-  }
-  if (command === 'inspect' && (values['profile-root'] !== undefined || values.profile?.length !== 1)) {
-    throw new Error('inspect requires exactly one --profile.');
-  }
-  const liveSend = command === 'send' && !values['dry-run'];
-  if (image && (!values['prompt-file']?.trim() || !values.output?.trim() || (values.profile === undefined
-    ? !values.ledger?.trim() : values.profile.length !== 1 || values.ledger !== undefined))) {
-    throw new Error('Not sent: specify --prompt-file, --output and either --ledger or one --profile. See image --help.');
-  }
-  if (command === 'inspect' || command === 'sync' || command === 'prune' || liveSend || image) await assertStandardUser();
-  if (liveSend || image) {
-    const { acquireSendLock } = await import('./send-lock.ts');
-    process.once('exit', acquireSendLock());
-  }
-  const root = values.profile === undefined
-    ? values['profile-root'] ?? join(process.env.LOCALAPPDATA!, 'chatgpt-cli', 'profiles') : undefined;
-  if (image) {
-    const { generateImage } = await import('./image.ts');
-    const selection = root === undefined ? { profile: values.profile![0]! } : { root, ledger: values.ledger! };
-    console.log(await generateImage(selection, values['prompt-file']!, values.output!, values.reference));
-    return;
-  }
-  if (command === 'prune') {
-    const { pruneProfiles } = await import('./browser/prune.ts');
-    for await (const result of pruneProfiles(root!, values.apply)) console.log(JSON.stringify(result));
-    return;
-  }
-  if (command === 'sync') {
-    if (!values.ledger || (root === undefined && values.profile?.length !== 1)) {
-      throw new Error('sync requires --ledger and accepts at most one --profile.');
-    }
-    const results = await syncUsage(root === undefined ? { profile: values.profile![0]! } : { root }, values.ledger);
-    console.log(JSON.stringify({ results }));
-    return;
-  }
-  const profiles = root === undefined ? resolveProfiles(values.profile!) : listProfiles(root);
-  if (login && root === undefined && profiles.length !== 1) throw new Error('login accepts only one --profile directory.');
-  if (command === 'profiles') {
-    console.log(JSON.stringify({ root: resolve(root!), profiles }));
-    return;
-  }
-  if (command === 'inspect') {
-    console.log(JSON.stringify({ profile: profiles[0], ...await inspectProfile(profiles[0]!) }));
-    return;
-  }
-  if (command === 'send' && profiles.length === 0) throw new Error('No owned profiles in this collection. Run npm run login first.');
-  const seed = values.seed ?? randomUUID();
-  const logs = join(process.env.LOCALAPPDATA!, 'chatgpt-cli', 'logs');
-  const requireCompletedRun = liveSend && (!process.stdin.isTTY || values.profile?.length !== 1);
-  const promptBatches = command === 'send'
-    ? (await import('./prompts/generate.ts')).generateBatches(profiles.map(profile => profile.path.toLowerCase()), seed,
-      sessionCount * roundsPerSession, readPromptHistory(logs, requireCompletedRun)) : [];
-  const batches = profiles.map((profile, index) => ({
-    profile,
-    sessions: Array.from({ length: command === 'send' ? sessionCount : 0 }, (_, session) =>
-      promptBatches[index]!.slice(session * roundsPerSession, (session + 1) * roundsPerSession)),
-  }));
-  if (values['dry-run']) {
-    console.log(JSON.stringify({ seed, profiles: batches.map(({ profile, sessions }) => ({ name: profile.name, sessions })) }, null, 2));
-    return;
-  }
-  if (login && root !== undefined) {
-    batches.splice(0, batches.length, { profile: createProfile(root), sessions: [] });
-  } else {
-    for (const profile of profiles) assertProfileDirectory(profile.path, !login);
-    if (login) mkdirSync(profiles[0]!.path, { recursive: true });
-  }
-  mkdirSync(logs, { recursive: true });
-  const logFile = join(logs, `${new Date().toISOString().replaceAll(':', '-')}-${randomUUID()}.jsonl`);
-  const log = (event: string, details: Record<string, unknown> = {}) => {
-    const record = { time: new Date().toISOString(), event, ...details };
-    appendFileSync(logFile, JSON.stringify(record) + '\n', 'utf8');
-    console.log(JSON.stringify(record));
-  };
-  log('started', { command, seed, profiles: batches.length, logFile });
-  if (login || command === 'open') {
-    for (const { profile } of batches) {
-      await openProfile(profile, login ? 'https://chatgpt.com/' : 'https://chatgpt.com/#settings/Usage');
-      log('profile-opened', { profile: profile.name });
-    }
-    log('finished', { success: true });
-    return;
-  }
-  const { terminateProfiles } = await import('./browser/processes.ts');
-  for (const { profile, pid } of await terminateProfiles(profiles)) {
-    log('profile-terminated', { profile: profile.name, pid });
-  }
-  let failed = false;
-  let lastSend = 0;
-  sending: for (let session = 0; session < sessionCount; session++) {
-    for (const batch of [...batches]) {
-      const { profile, sessions } = batch;
-      const prompts = sessions[session]!;
-      const details = { profile: profile.name, session: session + 1 };
-      log('session-started', details);
-      try {
-        const edge = await launchProfile(profile);
-        try {
-          const page = edge.context.pages()[0];
-          if (!page) throw new Error('Edge did not create its initial tab.');
-          const windowSession = await edge.context.newCDPSession(page);
-          try {
-            const { windowId } = await windowSession.send('Browser.getWindowForTarget');
-            await windowSession.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
-          } finally {
-            await windowSession.detach();
-          }
-          await runChat(page, prompts, {
-            beforeSend: async () => {
-              const delay = Math.max(0, lastSend + 30_000 - Date.now());
-              if (delay) await setTimeout(delay);
-            },
-            onEvent: (event, prompt) => {
-              if (event === 'sending') lastSend = Date.now();
-              log(event, { ...details, round: prompts.indexOf(prompt) + 1, promptId: prompt.id, url: page.url() });
-            },
-            onChallenge: event => log('challenge', { ...details, ...event }),
-          });
-        } finally {
-          await edge.close();
-        }
-        log('session-completed', details);
-        if (session === sessionCount - 1) log('profile-completed', details);
-      } catch (error) {
-        if (error instanceof NonFreeAccountError) {
-          batches.splice(batches.indexOf(batch), 1);
-          log('profile-skipped', { ...details, reason: 'non-free-account' });
-          continue;
-        }
-        failed = true;
-        log('profile-failed', { ...details, error: String(error) });
-        log('batch-stopped', { ...details, reason: error instanceof AccessBlockedError
-          ? 'Access blocked; stopping further submissions in every profile.'
-          : 'The session failed; review its result before sending again.' });
-        break sending;
+const commands: Record<string, Command> = {
+  login: {
+    description: 'Create one profile and open Edge for manual sign-in.',
+    options: { profile: flags.profile },
+    notes: 'Use --profile to reopen an existing profile instead of creating a new one.',
+    async run(root, { profile: name }) {
+      const profile = name === undefined ? createProfile(root) : listProfiles(root, name)[0]!;
+      await openProfile(profile, 'https://chatgpt.com/');
+      console.log(`Opened ${profile.name}. Sign in to ChatGPT in Edge.`);
+    },
+  },
+  open: {
+    description: 'Open your profiles at ChatGPT Usage in Edge.',
+    options: { profile: flags.profile },
+    async run(root, { profile: name }) {
+      const profiles = listProfiles(root, name);
+      if (!profiles.length) console.log(noProfiles);
+      for (const profile of profiles) {
+        await openProfile(profile, 'https://chatgpt.com/#settings/Usage');
+        console.log(`Opened ${profile.name}.`);
       }
-    }
-  }
-  log('finished', { success: !failed });
-  if (failed) process.exitCode = 1;
+    },
+  },
+  profiles: {
+    description: 'List profile names, or check, sync, or prune them.',
+    notes: 'Only marked profiles in %LOCALAPPDATA%/chatgpt-cli/profiles are used. Archived profiles are excluded.',
+    run(root) {
+      const profiles = listProfiles(root);
+      console.log(profiles.length ? profiles.map(profile => profile.name).join('\n') : noProfiles);
+    },
+    subcommands: {
+      check: {
+        description: 'Check one profile for sign-in and its personal plan.',
+        options: { profile: flags.profile },
+        requireProfile: true,
+        notes: 'Use a non-elevated terminal and close the profile in Edge first.',
+        async run(root, { profile: name }) {
+          await assertStandardUser();
+          const profile = listProfiles(root, name)[0]!;
+          const { inspectProfile } = await import('./browser/inspect.ts');
+          console.log(`${profile.name}: ${describeInspection(await inspectProfile(profile))}`);
+        },
+      },
+      sync: {
+        description: 'Update a private CSV and name confirmed profiles after their email address.',
+        args: ['ACCOUNTS.csv'],
+        options: { profile: flags.profile },
+        notes: 'Use an existing CSV with kind,value,state columns and a non-elevated terminal. Close the selected profiles in Edge first.',
+        async run(root, { profile: name }, [ledger]) {
+          await assertStandardUser();
+          const { syncUsage } = await import('./usage/sync.ts');
+          const results = await syncUsage(root, ledger!, name);
+          if (!results.length) console.log(noProfiles);
+          for (const result of results) {
+            const updates = [result.updated && 'Ledger updated.', result.renamed && 'Profile renamed.'].filter(Boolean);
+            console.log([`${result.profile.name}: ${describeInspection(result)}`, ...updates].join(' '));
+          }
+        },
+      },
+      prune: {
+        description: 'Preview removal of confirmed signed-out profiles.',
+        options: { apply: flags.apply },
+        notes: 'Use a non-elevated terminal and close dedicated Edge windows. The preview contacts ChatGPT and starts the five-minute inspection cooldown.',
+        async run(root, { apply }) {
+          await assertStandardUser();
+          const { pruneProfiles } = await import('./browser/prune.ts');
+          for await (const { profile, action, reason } of pruneProfiles(root, apply)) {
+            const label = action === 'would-delete' ? 'Would delete' : action === 'deleted' ? 'Deleted' : 'Kept';
+            console.log(`${label} ${profile.name} (${reason}).`);
+          }
+        },
+      },
+    },
+  },
+  send: {
+    description: 'Send scheduled prompt batches to signed-in Free profiles.',
+    options: { 'dry-run': flags['dry-run'], profile: flags.profile, seed: flags.seed },
+    notes: [
+      'Start with --dry-run. A live send closes any open Edge windows in the selected dedicated profiles.',
+      'It visits Free profiles in 5 loops, with 5 rounds per visit and at least 30 seconds between submissions.',
+      'Uses a non-elevated terminal. Checks challenges without interacting with verification controls.',
+      'Stops on five consecutive Cloudflare challenge responses or other unresolved access or session failures.',
+      'After a partial send, collection-wide and unattended replays are refused.',
+    ].join('\n'),
+    async run(root, { profile: name, seed, 'dry-run': dryRun }) {
+      const { send } = await import('./send.ts');
+      await send(root, name, seed, dryRun);
+    },
+  },
+  image: {
+    description: 'Generate one PNG from a UTF-8 brief using a Plus profile.',
+    args: ['BRIEF.txt', 'NEW.png'],
+    options: { profile: flags.profile, reference: flags.reference },
+    requireProfile: true,
+    notes: 'Use a non-elevated terminal. Sign in to personal Plus and close the profile in Edge. Paths are relative to the current directory. Success prints only the PNG path.',
+    async run(root, { profile: name, reference }, [brief, output]) {
+      await assertStandardUser();
+      const profile = listProfiles(root, name)[0]!;
+      const { acquireSendLock } = await import('./send-lock.ts');
+      const release = acquireSendLock();
+      try {
+        const { generateImage } = await import('./image.ts');
+        console.log(await generateImage(profile, brief!, output!, reference));
+      } finally { release(); }
+    },
+  },
+};
+
+function optionName(name: string, option: Option): string {
+  return `--${name}${option.metavar ? ' ' + option.metavar : ''}`;
 }
 
-if (process.argv[1] && normalize(resolve(process.argv[1])).toLowerCase() ===
-    normalize(fileURLToPath(import.meta.url)).toLowerCase()) {
-  main().catch(error => { console.error(String(error)); process.exitCode = 1; });
+function usage(name: string, command: Command): string {
+  const args = [name, ...(command.args ?? [])];
+  if (command.requireProfile) args.push(optionName('profile', flags.profile));
+  if (command.options && Object.keys(command.options).some(key => key !== 'profile' || !command.requireProfile)) {
+    args.push('[options]');
+  }
+  return 'Usage: chatgpt-cli ' + args.join(' ');
 }
+
+function helpList(entries: [string, string][]): string[] {
+  const width = Math.max(...entries.map(([name]) => name.length));
+  return entries.map(([name, description]) => `  ${name.padEnd(width)}  ${description}`);
+}
+
+async function main([first, ...args]: string[]): Promise<void> {
+  if (first === undefined || first === '--help' || first === '-h') {
+    if (args.length) throw new Error('Run chatgpt-cli COMMAND --help for command help.');
+    console.log([
+      'Usage: chatgpt-cli COMMAND [options]', '',
+      ...helpList(Object.entries(commands).map(([name, command]) => [name, command.description])),
+      '', 'Start with chatgpt-cli login. Run chatgpt-cli COMMAND --help for options.',
+    ].join('\n'));
+    return;
+  }
+  if (!Object.hasOwn(commands, first)) throw new Error(`Unknown command: ${first}. Run chatgpt-cli --help.`);
+  let command = commands[first]!;
+  let name = first;
+  const operation = args[0];
+  if (command.subcommands && operation && !operation.startsWith('-')) {
+    if (!Object.hasOwn(command.subcommands, operation)) {
+      throw new Error(`Unknown profiles command: ${operation}. Run chatgpt-cli profiles --help.`);
+    }
+    command = command.subcommands[operation]!;
+    name += ' ' + operation;
+    args = args.slice(1);
+  }
+  const options: Record<string, Option> = { ...command.options, help: flags.help };
+  const invalid = (message: string) => new Error(`${message}\nRun chatgpt-cli ${name} --help for usage.`);
+  let parsed;
+  try {
+    parsed = parseArgs({ args, options, allowPositionals: true, tokens: true });
+  } catch (error) {
+    throw invalid(error instanceof Error ? error.message : String(error));
+  }
+  const { positionals, tokens } = parsed;
+  const values = parsed.values as Values;
+  if (values.help) {
+    console.log([
+      usage(name, command), '', command.description,
+      ...(command.subcommands ? ['', 'Commands:',
+        ...helpList(Object.entries(command.subcommands).map(([key, subcommand]) => [key, subcommand.description]))] : []),
+      '', 'Options:', ...helpList(Object.entries(options).map(([key, option]) => [optionName(key, option), option.description])),
+      ...(command.notes ? ['', command.notes] : []),
+    ].join('\n'));
+    return;
+  }
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    if (token.kind !== 'option') continue;
+    if (seen.has(token.name) && !options[token.name]?.multiple) throw invalid(`Use --${token.name} only once.`);
+    if (token.value !== undefined && !token.value.trim()) throw invalid(`--${token.name} requires a nonempty value.`);
+    seen.add(token.name);
+  }
+  if (positionals.length !== (command.args?.length ?? 0) || positionals.some(arg => !arg.trim()) ||
+      (command.requireProfile && values.profile === undefined)) {
+    throw invalid(usage(name, command));
+  }
+  if (process.platform !== 'win32') throw new Error('This command requires Windows and Microsoft Edge.');
+  await command.run(profileRoot(), values, positionals);
+}
+
+main(process.argv.slice(2)).catch(error => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});

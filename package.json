@@ -3,16 +3,16 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Manage dedicated ChatGPT Edge profiles, synchronize private ledgers, and send locally generated prompts on Windows.",
+  "description": "Manage dedicated ChatGPT Edge profiles, send prompts, and generate images on Windows.",
+  "bin": {
+    "chatgpt-cli": "src/main.ts"
+  },
   "engines": {
     "node": ">=22.18.0"
   },
   "scripts": {
     "pretest": "node --input-type=module -e \"import { assertStandardUser } from './src/browser/edge.ts'; await assertStandardUser()\"",
-    "test": "tsc && node --test --test-concurrency=1 tests/*.test.ts",
-    "login": "node src/main.ts login",
-    "preview": "node src/main.ts send --dry-run",
-    "start": "node src/main.ts send"
+    "test": "tsc && node --test --test-concurrency=1 tests/*.test.ts"
   },
   "dependencies": {
     "csv-parse": "7.0.3",

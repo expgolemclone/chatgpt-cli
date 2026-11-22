@@ -62,7 +62,7 @@ test('termination validates identities and excludes normal Edge before touching 
     const profile = createProfile(join(temporary, 'profiles'));
     writeFileSync(join(profile.path, '.gpt-usage-id'), '0'.repeat(32));
     await assert.rejects(terminateProfiles([profile]), /identity changed/);
-    await assert.rejects(terminateProfiles([{ name: 'normal',
+    await assert.rejects(terminateProfiles([{ ...profile, name: 'normal',
       path: join(process.env.LOCALAPPDATA!, 'Microsoft', 'Edge', 'User Data') }]), /Normal Edge/);
     assert.deepEqual(await terminateProfiles([]), []);
   } finally { rmSync(temporary, { recursive: true, force: true }); }

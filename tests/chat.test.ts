@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { test } from 'node:test';
 import type { Page } from 'playwright';
 import { launchProfile } from '../src/browser/edge.ts';
+import { createProfile } from '../src/browser/profiles.ts';
 import { NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
 import { AccessBlockedError, assertAccess, type ChallengeEvent } from '../src/browser/account.ts';
 import { generateBatches, maxPrompts, type Prompt } from '../src/prompts/generate.ts';
@@ -13,7 +14,7 @@ const prompt: Prompt = { id: 'test', text: 'Review this:\n```ts\nconst n = 3;\n`
 
 test('access checks ignore conversation text but still detect actual warnings', async () => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-access-text-test-');
-  const edge = await launchProfile({ path: temporary, name: 'fixture' });
+  const edge = await launchProfile(createProfile(temporary));
   try {
     const page = await edge.context.newPage();
     const options = { challengeTimeoutMs: 100, pollMs: 10 };
@@ -191,7 +192,7 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
   assert.ok(address && typeof address !== 'string');
   const url = `http://127.0.0.1:${address.port}/`;
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-chat-test-');
-  const edge = await launchProfile({ path: temporary, name: 'fixture' });
+  const edge = await launchProfile(createProfile(temporary));
   const { context } = edge;
   const page = await context.newPage();
   page.on('pageerror', error => t.diagnostic(String(error)));

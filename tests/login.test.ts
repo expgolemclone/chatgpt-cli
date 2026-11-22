@@ -34,7 +34,7 @@ test('ordinary Edge login persists data and is not launched or controlled by Pla
   try {
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
-    let profilePath: string | undefined;
+    let previousProfile: ReturnType<typeof createProfile> | undefined;
     const preload = join(temporary, 'fixture.mjs');
     const launches = join(temporary, 'launches.jsonl');
     writeFileSync(preload, manualPreload);
@@ -42,19 +42,19 @@ test('ordinary Edge login persists data and is not launched or controlled by Pla
       await t.test(previous === 'null' ? 'creates its own dedicated profile' : 'reopens it without copying browser data', async () => {
         const before = observed.length;
         const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, 'login',
-          ...(profilePath === undefined ? [] : ['--profile', profilePath])], {
+          ...(previousProfile === undefined ? [] : ['--profile', previousProfile.name])], {
           encoding: 'utf8', timeout: 15_000, env: { ...process.env, LOCALAPPDATA: localAppData,
             FIXTURE_LAUNCHES: launches, FIXTURE_URL: `http://127.0.0.1:${address.port}/` },
         });
         assert.equal(result.status, 0, result.stdout + result.stderr);
-        const records = result.stdout.trim().split('\n').map(line => JSON.parse(line));
-        assert.equal(records.filter(record => record.event === 'profile-opened').length, 1);
-        assert.equal(records.some(record => ['sending','sent','completed'].includes(record.event)), false);
         const launch = readFileSync(launches, 'utf8').trim().split('\n').map(line => JSON.parse(line)).at(-1)!;
         const profiles = listProfiles(profileRoot);
         assert.equal(profiles.length, 1);
-        if (profilePath === undefined) profilePath = profiles[0]!.path;
-        assert.equal(launch.directory, profilePath);
+        previousProfile ??= profiles[0]!;
+        assert.deepEqual(profiles[0], previousProfile);
+        assert.equal(result.stdout.trim(), 'Opened ' + previousProfile.name + '. Sign in to ChatGPT in Edge.');
+        assert.equal(launch.directory, previousProfile.path);
+        assert.equal(existsSync(join(localAppData, 'chatgpt-cli', 'logs')), false);
         assert.equal(dirname(launch.directory), profileRoot);
         assert.equal(readFileSync(join(launch.directory, '.gpt-usage-id'), 'utf8'), profiles[0]!.id);
         assert.equal(launch.url, 'https://chatgpt.com/');
@@ -62,7 +62,7 @@ test('ordinary Edge login persists data and is not launched or controlled by Pla
         while (observed.length === before && Date.now() < deadline) await setTimeout(100);
         assert.ok(observed.length > before, 'The new window must load the page.');
         assert.equal(observed.at(-1), previous);
-        assert.equal(existsSync(join(profilePath, 'DevToolsActivePort')), false, 'Manual Edge has no debugging endpoint.');
+        assert.equal(existsSync(join(previousProfile.path, 'DevToolsActivePort')), false, 'Manual Edge has no debugging endpoint.');
         await closeWindow(launch.pid);
         assert.equal(existsSync(join(localAppData, 'gpt-usage')), false);
         assert.equal(existsSync(join(localAppData, 'gpt-send-messages')), false);
@@ -77,24 +77,25 @@ test('ordinary Edge login persists data and is not launched or controlled by Pla
 
 test('prune, inspection, and send dry-run leave a busy browser in place', async () => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-native-lock-');
-  const profile = createProfile(join(temporary, 'profiles'));
+  const localAppData = join(temporary, 'localappdata');
+  const profile = createProfile(join(localAppData, 'chatgpt-cli', 'profiles'));
   const edge = await launchProfile(profile);
   try {
     const page = edge.context.pages()[0]!;
     await page.goto('data:text/html,' + encodeURIComponent('<title>Keep existing browser</title>'));
     const run = (command: string, ...args: string[]) => spawnSync(process.execPath, [cli, command, ...args], {
-      encoding: 'utf8', timeout: 25_000, env: { ...process.env, LOCALAPPDATA: join(temporary, 'localappdata') },
+      encoding: 'utf8', timeout: 25_000, env: { ...process.env, LOCALAPPDATA: localAppData },
     });
-    const sent = run('send', '--profile', profile.path, '--dry-run');
+    const sent = run('send', '--profile', profile.name, '--dry-run');
     assert.equal(sent.status, 0, sent.stdout + sent.stderr);
     assert.deepEqual(JSON.parse(sent.stdout).profiles[0].sessions.map((session: unknown[]) => session.length), [5, 5, 5, 5, 5]);
-    const pruned = run('prune', '--profile-root', dirname(profile.path), '--apply');
+    const pruned = run('profiles', 'prune', '--apply');
     assert.equal(pruned.status, 0, pruned.stdout + pruned.stderr);
-    assert.deepEqual(JSON.parse(pruned.stdout), { profile, status: 'unknown', reason: 'profile_in_use', action: 'keep' });
+    assert.equal(pruned.stdout.trim(), 'Kept ' + profile.name + ' (profile_in_use).');
     assert.equal(existsSync(join(profile.path, '.gpt-usage-access.json')), false);
-    const inspected = run('inspect', '--profile', profile.path);
+    const inspected = run('profiles', 'check', '--profile', profile.name);
     assert.equal(inspected.status, 0, inspected.stdout + inspected.stderr);
-    assert.equal(JSON.parse(inspected.stdout).status, 'unknown');
+    assert.match(inspected.stdout, /Could not confirm sign-in/);
     assert.equal(await page.title(), 'Keep existing browser');
     assert.equal(existsSync(join(profile.path, 'DevToolsActivePort')), true);
   } finally {

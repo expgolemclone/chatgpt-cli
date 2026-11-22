@@ -4,221 +4,188 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { assertProfileDirectory, createProfile, resolveProfiles } from '../src/browser/profiles.ts';
+import { assertDedicatedDirectory, createProfile } from '../src/browser/profiles.ts';
 import { generateBatches, type Prompt } from '../src/prompts/generate.ts';
+import { createNamedProfile } from './fixtures/profiles.ts';
 
 const cli = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
-test('standalone CLI resolves its own dedicated profiles without another project or PowerShell', async t => {
-  const temporary = mkdtempSync('C:/dev/tmp/gpt-message-cli-');
+test('the standalone CLI discovers the default collection and validates each command before side effects', async t => {
+  const temporary = mkdtempSync('C:/dev/tmp/chatgpt-cli-test-');
+  const localAppData = join(temporary, 'localappdata');
+  const root = join(localAppData, 'chatgpt-cli', 'profiles');
+  const logs = join(localAppData, 'chatgpt-cli', 'logs');
+  const env = { ...process.env, LOCALAPPDATA: localAppData, PATH: dirname(process.execPath) };
+  const lock = new URL('./fixtures/send-lock.mjs', import.meta.url).href;
+  const run = (...args: string[]) => spawnSync(process.execPath, ['--import', lock, cli, ...args], {
+    encoding: 'utf8', timeout: 10_000, env,
+  });
   try {
-    const localAppData = join(temporary, 'localappdata');
-    const defaultRoot = join(localAppData, 'chatgpt-cli', 'profiles');
-    const run = (...args: string[]) => spawnSync(process.execPath,
-      ['--import', new URL('./fixtures/send-lock.mjs', import.meta.url).href, cli, ...args], {
-      encoding: 'utf8', timeout: 10_000,
-      env: { ...process.env, LOCALAPPDATA: localAppData, PATH: dirname(process.execPath) },
-    });
-    await t.test('help describes login, safety, and the only runtime requirements without creating state', () => {
-      for (const args of [[], ['--help'], ['send', '--help']]) {
+    await t.test('help lists everyday commands and only the options for the selected command', () => {
+      for (const args of [[], ['--help'], ['-h']]) {
         const result = run(...args);
-        assert.equal(result.error, undefined);
-        assert.equal(result.status, 0, result.stdout + result.stderr);
-        assert.match(result.stdout, /<login\|open\|profiles\|inspect\|sync\|prune\|send\|image>/);
-        assert.match(result.stdout, /--apply\s+Permanently delete confirmed signed-out local profiles/);
-        assert.match(result.stdout, /No PowerShell 7 or other project/);
-        assert.match(result.stdout, /Send force-closes only selected dedicated Edge profiles/);
-        assert.match(result.stdout, /Other commands never terminate existing browser windows/);
-        assert.match(result.stdout, /without interacting with verification controls/);
-        assert.match(result.stdout, /Five consecutive Cloudflare challenge responses stop the whole batch/);
-        assert.match(result.stdout, /%LOCALAPPDATA%\/chatgpt-cli\/profiles/);
-        assert.match(result.stdout, /accounts in order for 5 loops/);
-        assert.match(result.stdout, /5 prompt\/answer rounds \(25 per account\)/);
-        assert.match(result.stdout, /including account and loop boundaries/);
-        assert.doesNotMatch(result.stdout, /gpt-send-messages|--questions|--sessions|--rounds/);
-        assert.equal(existsSync(localAppData), false);
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(result.stdout, /chatgpt-cli COMMAND/);
+        assert.match(result.stdout, /Start with chatgpt-cli login/);
+        assert.doesNotMatch(result.stdout, /--profile-root|--apply|--reference/);
       }
+      const send = run('send', '--help');
+      assert.equal(send.status, 0, send.stderr);
+      assert.match(send.stdout, /--dry-run/);
+      assert.match(send.stdout, /closes any open Edge windows in the selected dedicated profiles/);
+      assert.match(send.stdout, /5 loops, with 5 rounds per visit and at least 30 seconds/);
+      assert.match(send.stdout, /without interacting with verification controls/);
+      assert.match(send.stdout, /five consecutive Cloudflare challenge responses/);
+      assert.doesNotMatch(send.stdout, /--apply|--reference/);
+      assert.match(run('profiles', '--help').stdout, /Commands:[\s\S]*check[\s\S]*sync[\s\S]*prune/);
+      assert.match(run('profiles', 'prune', '-h').stdout, /--apply[\s\S]*five-minute inspection cooldown/);
+      assert.equal(existsSync(localAppData), false);
     });
-    await t.test('empty default collection is read-only and never falls back to legacy profiles', () => {
-      assert.deepEqual(JSON.parse(run('profiles').stdout), { root: defaultRoot, profiles: [] });
+
+    await t.test('an empty collection is read-only and never falls back to legacy profiles', () => {
+      assert.match(run('profiles').stdout, /No dedicated profiles/);
       for (const args of [['send'], ['send', '--dry-run']]) {
         const result = run(...args);
         assert.equal(result.status, 1, result.stdout + result.stderr);
-        assert.match(result.stderr, /Run npm run login first/);
+        assert.match(result.stderr, /Run chatgpt-cli login/);
         assert.equal(existsSync(localAppData), false);
       }
-      try {
-        const legacy = createProfile(join(localAppData, 'gpt-usage'));
-        mkdirSync(join(localAppData, 'gpt-send-messages', 'profile'), { recursive: true });
-        assert.deepEqual(JSON.parse(run('profiles').stdout), { root: defaultRoot, profiles: [] });
-        const result = run('send', '--dry-run');
-        assert.equal(result.status, 1, result.stdout + result.stderr);
-        assert.match(result.stderr, /No owned profiles/);
-        assert.equal(readFileSync(join(legacy.path, '.gpt-usage-id'), 'utf8'), legacy.id);
-        assert.equal(existsSync(defaultRoot), false);
-      } finally { rmSync(localAppData, { recursive: true, force: true }); }
+      const legacy = createProfile(join(localAppData, 'gpt-usage'));
+      assert.match(run('profiles').stdout, /No dedicated profiles/);
+      assert.equal(run('send', '--dry-run').status, 1);
+      assert.equal(readFileSync(join(legacy.path, '.gpt-usage-id'), 'utf8'), legacy.id);
+      assert.equal(existsSync(root), false);
+      rmSync(localAppData, { recursive: true });
     });
-    await t.test('default preview uses marked profiles without opening a browser or writing logs', () => {
-      try {
-        const profiles = [createProfile(defaultRoot), createProfile(defaultRoot)];
-        mkdirSync(join(defaultRoot, 'unmarked'));
-        mkdirSync(join(defaultRoot, 'archive'));
-        writeFileSync(join(defaultRoot, 'archive', '.gpt-usage-id'), 'invalid archive identity');
-        const listed = run('profiles');
-        assert.equal(listed.status, 0, listed.stdout + listed.stderr);
-        assert.deepEqual(JSON.parse(listed.stdout), { root: defaultRoot, profiles });
-        const result = run('send', '--dry-run', '--seed', 'test-seed');
-        assert.equal(result.error, undefined);
-        assert.equal(result.status, 0, result.stdout + result.stderr);
-        const prompts = generateBatches(profiles.map(item => item.path.toLowerCase()), 'test-seed', 25);
-        assert.deepEqual(JSON.parse(result.stdout), {
-          seed: 'test-seed',
-          profiles: profiles.map((profile, index) => ({
-            name: profile.name,
-            sessions: Array.from({ length: 5 }, (_, session) => prompts[index]!.slice(session * 5, (session + 1) * 5)),
-          })),
-        });
-        assert.equal(existsSync(join(localAppData, 'chatgpt-cli', 'logs')), false);
-        assert.equal(existsSync(join(localAppData, 'gpt-send-messages')), false);
-      } finally { rmSync(localAppData, { recursive: true, force: true }); }
-    });
-    await t.test('explicit profiles need no markers or inventory and keep their own reproducible selection', () => {
-      const paths = [join(temporary, '専用 profile'), join(temporary, 'second')];
-      const result = run('send', '--dry-run', '--seed', 'batch', ...paths.flatMap(path => ['--profile', path]));
-      assert.equal(result.status, 0, result.stdout + result.stderr);
-      const sessions = JSON.parse(result.stdout).profiles.map((profile: { sessions: Prompt[][] }) => profile.sessions);
-      for (const profile of sessions) {
-        assert.deepEqual(profile.map((session: Prompt[]) => session.length), [5, 5, 5, 5, 5]);
-      }
-      assert.deepEqual(sessions.map((profile: Prompt[][]) => profile.flat()),
-        generateBatches(paths.map(path => path.toLowerCase()), 'batch', 25));
-      for (const path of paths) assert.equal(existsSync(path), false);
-      assert.equal(existsSync(localAppData), false);
-    });
-    await t.test('preview uses attempted history across profiles without changing the logs', () => {
-      const paths = [join(temporary, 'preview-one'), join(temporary, 'preview-two')];
-      const ids = paths.map(path => path.toLowerCase());
-      const initial = generateBatches(ids, 'history', 25);
-      const attempted = initial[0]![0]!.id;
-      const planned = initial[0]![1]!.id;
-      const time = '2026-01-01T00:00:00.000Z';
-      const contents = [
-        JSON.stringify({ event: 'sending', time, promptId: attempted }),
-        JSON.stringify({ event: 'profile-failed', time }),
-        JSON.stringify({ event: 'planned', time, promptId: planned }),
-      ].join('\n') + '\n';
-      const logs = join(localAppData, 'chatgpt-cli', 'logs');
-      try {
-        mkdirSync(logs, { recursive: true });
-        const log = join(logs, 'old.jsonl');
-        writeFileSync(log, contents);
-        const args = ['send', '--dry-run', '--seed', 'history', ...paths.flatMap(path => ['--profile', path])];
-        const first = run(...args);
-        const second = run(...args);
-        assert.equal(first.status, 0, first.stdout + first.stderr);
-        assert.equal(second.status, 0, second.stdout + second.stderr);
-        assert.equal(first.stdout, second.stdout);
-        const actual: Prompt[][][] = JSON.parse(first.stdout).profiles.map((profile: { sessions: Prompt[][] }) => profile.sessions);
-        assert.deepEqual(actual.map(sessions => sessions.flat()),
-          generateBatches(ids, 'history', 25, new Map([[attempted, Date.parse(time)]])));
-        assert.equal(new Set(actual.flat(2).map(prompt => prompt.id)).size, 50);
-        assert.equal(actual.flat(2).some(prompt => prompt.id === attempted), false);
-        const retry = run('send', '--profile', paths[0]!);
-        assert.equal(retry.status, 1);
-        assert.match(retry.stderr, /Automatic replay refused/);
-        assert.equal(retry.stdout, '');
-        assert.deepEqual(readdirSync(logs), ['old.jsonl']);
-        assert.equal(readFileSync(log, 'utf8'), contents);
-        for (const path of paths) assert.equal(existsSync(path), false);
-      } finally { rmSync(localAppData, { recursive: true, force: true }); }
-    });
-    await t.test('invalid commands, removed count options, paths, and login options fail before side effects', () => {
-      const cases = [
-        ['invalid'], ['send', 'extra'], ['send', '--manifest', 'old.json'],
-        ['send', '--apply'], ['prune', '--profile', join(temporary, 'one')], ['prune', '--dry-run'],
-        ['send', '--profile', ''], ['send', '--profile', 'relative'],
-        ['login', '--questions', '1'], ['login', '--seed', 'test'], ['login', '--dry-run'],
-        ['login', '--profile', join(temporary, 'one'), '--profile', join(temporary, 'two')],
-        ...['--questions', '--sessions', '--rounds'].map(option => ['send', option, '5']),
-        ['send', '--questions=1'],
-      ];
-      for (const args of cases) {
+
+    await t.test('invalid commands, obsolete flags and unknown names never create state', () => {
+      for (const args of [
+        ['unknown'], ['constructor'], ['send', 'extra'], ['send', '--questions=1'],
+        ['send', '--apply'], ['send', '--profile-root', root], ['open', '--dry-run'],
+        ['profiles', 'toString'], ['profiles', 'check'], ['profiles', 'check', '--profile', ' '],
+        ['profiles', 'sync'], ['profiles', 'prune', '--profile', 'one'], ['profiles', 'prune', '--dry-run'],
+        ['login', '--profile', 'one', '--profile', 'two'], ['login', '--profile', 'missing'],
+        ['login', '--profile', join(temporary, 'absolute')], ['send', '--profile', 'missing', '--dry-run'],
+      ]) {
         const result = run(...args);
         assert.equal(result.error, undefined);
         assert.equal(result.status, 1, JSON.stringify(args) + result.stdout + result.stderr);
         assert.equal(result.stdout, '');
+        assert.match(result.stderr, /chatgpt-cli .*--help|Run chatgpt-cli profiles/);
         assert.equal(existsSync(localAppData), false);
       }
     });
-    await t.test('send cannot silently create a missing or misspelled profile', () => {
-      for (const selection of [[], ['--profile', join(temporary, 'missing')]]) {
-        const result = run('send', ...selection);
-        assert.equal(result.status, 1);
-        assert.match(result.stderr, /Run npm run login first/);
-        assert.equal(existsSync(localAppData), false);
+
+    const profiles = [createNamedProfile(root, 'free one'), createNamedProfile(root, 'free-two')];
+    mkdirSync(join(root, 'unmarked'));
+    createProfile(join(root, 'archive'));
+    const names = profiles.map(profile => profile.name);
+    const ids = profiles.map(profile => profile.path.toLowerCase());
+    await t.test('preview uses owned profiles and supports an exact case-insensitive name', () => {
+      assert.equal(run('profiles').stdout.trimEnd(), names.join('\n'));
+      const result = run('send', '--dry-run', '--seed', 'test-seed');
+      assert.equal(result.status, 0, result.stderr);
+      const prompts = generateBatches(ids, 'test-seed', 25);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        seed: 'test-seed',
+        profiles: names.map((name, index) => ({
+          name,
+          sessions: Array.from({ length: 5 }, (_, session) => prompts[index]!.slice(session * 5, (session + 1) * 5)),
+        })),
+      });
+      const single = run('send', '--dry-run', '--profile', 'FREE ONE');
+      assert.equal(single.status, 0, single.stderr);
+      assert.deepEqual(JSON.parse(single.stdout).profiles.map((profile: { name: string }) => profile.name), [names[0]]);
+      for (const name of [profiles[0]!.path, 'free', 'unmarked', 'archive', '../gpt-usage']) {
+        assert.match(run('send', '--dry-run', '--profile', name).stderr, /No profile named/);
       }
+      assert.equal(existsSync(logs), false);
+      for (const profile of profiles) assert.deepEqual(readdirSync(profile.path), ['.gpt-usage-id']);
     });
-    await t.test('normal Edge data, overlapping directories, files, and links are rejected', () => {
-      const profilePath = join(temporary, 'dedicated');
-      mkdirSync(profilePath);
-      assert.deepEqual(resolveProfiles([profilePath], localAppData), [{ name: 'dedicated', path: profilePath }]);
-      assert.doesNotThrow(() => assertProfileDirectory(profilePath, true));
-      for (const paths of [
-        [join(localAppData, 'Microsoft', 'Edge', 'User Data')],
-        [join(localAppData, 'Microsoft', 'Edge', 'User Data', 'Default')],
-        [join(localAppData, 'Microsoft', 'Edge', 'User Data', '..automation')],
-        [localAppData], [profilePath, profilePath.toUpperCase()],
-        [profilePath, join(profilePath, 'child')],
-      ]) assert.throws(() => resolveProfiles(paths, localAppData));
-      const file = join(temporary, 'not-directory');
-      writeFileSync(file, 'test');
-      assert.throws(() => resolveProfiles([file], localAppData));
-      const link = join(temporary, 'linked');
-      symlinkSync(profilePath, link, 'junction');
-      assert.throws(() => resolveProfiles([link], localAppData));
-      assert.throws(() => resolveProfiles([join(link, 'missing')], localAppData));
-      assert.deepEqual(resolveProfiles([], localAppData), []);
-      assert.throws(() => resolveProfiles([], 'relative'));
-      assert.throws(() => resolveProfiles([], ''));
+
+    await t.test('preview uses attempted history and live unattended replay is refused without opening Edge', () => {
+      const attempted = generateBatches(ids, 'history', 25)[0]![0]!.id;
+      const time = '2026-01-01T00:00:00.000Z';
+      const contents = [
+        JSON.stringify({ event: 'sending', time, promptId: attempted }),
+        JSON.stringify({ event: 'profile-failed', time }),
+      ].join('\n') + '\n';
+      mkdirSync(logs);
+      const log = join(logs, 'old.jsonl');
+      writeFileSync(log, contents);
+      const result = run('send', '--dry-run', '--seed', 'history');
+      assert.equal(result.status, 0, result.stderr);
+      const batches: Prompt[][][] = JSON.parse(result.stdout).profiles.map((profile: { sessions: Prompt[][] }) => profile.sessions);
+      assert.deepEqual(batches.map(sessions => sessions.flat()),
+        generateBatches(ids, 'history', 25, new Map([[attempted, Date.parse(time)]])));
+      assert.equal(new Set(batches.flat(2).map(prompt => prompt.id)).size, 50);
+      for (const args of [[], ['--profile', names[0]!]]) {
+        const retry = run('send', ...args);
+        assert.equal(retry.status, 1);
+        assert.match(retry.stderr, /Automatic replay refused/);
+        assert.equal(retry.stdout, '');
+      }
+      assert.deepEqual(readdirSync(logs), ['old.jsonl']);
+      assert.equal(readFileSync(log, 'utf8'), contents);
+      for (const profile of profiles) assert.deepEqual(readdirSync(profile.path), ['.gpt-usage-id']);
+      rmSync(logs, { recursive: true });
     });
+
     await t.test('elevated live commands stop before touching Edge, profiles, logs, or the ledger', () => {
       const elevated = join(temporary, 'elevated.mjs');
-      writeFileSync(elevated, `
-        import koffi from ${JSON.stringify(import.meta.resolve('koffi'))};
-        const load = koffi.load;
-        koffi.load = name => name === 'shell32.dll'
-          ? { func(definition) {
-            if (!definition.includes('IsUserAnAdmin')) throw new Error('Unexpected browser process access.');
-            return () => 1;
-          } } : load(name);
-      `);
-      const profile = createProfile(join(temporary, 'elevation-profiles'));
+      writeFileSync(elevated, [
+        'import koffi from ' + JSON.stringify(import.meta.resolve('koffi')) + ';',
+        'const load = koffi.load;',
+        'koffi.load = name => name === "shell32.dll" ? { func(definition) {',
+        '  if (!definition.includes("IsUserAnAdmin")) throw new Error("Unexpected browser process access.");',
+        '  return () => 1;',
+        '} } : load(name);',
+      ].join('\n'));
       const ledger = join(temporary, 'ledger.csv');
       const csv = 'kind,value,state\n';
       writeFileSync(ledger, csv);
-      for (const command of ['inspect', 'sync', 'prune', 'send']) {
-        const result = spawnSync(process.execPath, [
-          '--import', new URL('./fixtures/send-lock.mjs', import.meta.url).href,
-          '--import', pathToFileURL(elevated).href, cli, command,
-          ...(command === 'prune' ? ['--profile-root', dirname(profile.path), '--apply'] : ['--profile', profile.path]),
-          ...(command === 'sync' ? ['--ledger', ledger] : []),
-        ], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, LOCALAPPDATA: localAppData } });
+      for (const args of [
+        ['profiles', 'check', '--profile', names[0]!], ['profiles', 'sync', ledger],
+        ['profiles', 'prune', '--apply'], ['send'], ['image', 'brief.txt', 'new.png', '--profile', names[0]!],
+      ]) {
+        const result = spawnSync(process.execPath, ['--import', lock, '--import', pathToFileURL(elevated).href, cli, ...args],
+          { encoding: 'utf8', timeout: 10_000, env });
         assert.equal(result.status, 1, result.stderr);
         assert.match(result.stderr, /non-elevated Windows terminal/);
         assert.equal(result.stdout, '');
-        assert.equal(existsSync(localAppData), false);
-        assert.deepEqual(readdirSync(profile.path), ['.gpt-usage-id']);
-        assert.equal(readFileSync(ledger, 'utf8'), csv);
       }
-    });
-    await t.test('npm entry points invoke Node directly and do not depend on a PowerShell adapter', () => {
-      const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-      assert.equal(manifest.scripts.login, 'node src/main.ts login');
-      assert.equal(manifest.scripts.preview, 'node src/main.ts send --dry-run');
-      assert.equal(manifest.scripts.start, 'node src/main.ts send');
-      assert.equal(existsSync(new URL('../send-messages.ps1', import.meta.url)), false);
+      assert.equal(existsSync(logs), false);
+      for (const profile of profiles) assert.deepEqual(readdirSync(profile.path), ['.gpt-usage-id']);
+      assert.equal(readFileSync(ledger, 'utf8'), csv);
     });
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
+});
+
+test('dedicated directories reject normal Edge data, files, and links', () => {
+  const temporary = mkdtempSync('C:/dev/tmp/chatgpt-dedicated-dir-');
+  try {
+    const local = process.env.LOCALAPPDATA!;
+    const normal = join(local, 'Microsoft', 'Edge', 'User Data');
+    for (const path of [local, normal, join(normal, 'Default'), 'relative']) {
+      assert.throws(() => assertDedicatedDirectory(path, false));
+    }
+    const file = join(temporary, 'file');
+    writeFileSync(file, 'untouched');
+    assert.throws(() => assertDedicatedDirectory(file, false), /regular, unlinked directories/);
+    const directory = join(temporary, 'directory');
+    mkdirSync(directory);
+    const link = join(temporary, 'linked');
+    symlinkSync(directory, link, 'junction');
+    for (const path of [link, join(link, 'missing')]) {
+      assert.throws(() => assertDedicatedDirectory(path, false), /unlinked/);
+    }
+  } finally { rmSync(temporary, { recursive: true, force: true }); }
+});
+
+test('npm exposes the same Node entry point without redundant scripts', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.deepEqual(manifest.bin, { 'chatgpt-cli': 'src/main.ts' });
+  for (const alias of ['login', 'preview', 'start']) assert.equal(Object.hasOwn(manifest.scripts, alias), false);
 });

@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { generateBatches } from '../src/prompts/generate.ts';
 import { challengeFixture, featurePath, fixture } from './fixtures/chat.ts';
+import { createNamedProfile } from './fixtures/profiles.ts';
 import { sendPacingFixture } from './fixtures/send-pacing.ts';
 
 interface Scenario {
@@ -34,15 +35,16 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
       import { existsSync, readFileSync } from 'node:fs';
       import { setTimeout } from 'node:timers/promises';
       import { chromium } from ${JSON.stringify(import.meta.resolve('playwright'))};
+      import { listProfiles, profileRoot } from ${JSON.stringify(new URL('../src/browser/profiles.ts', import.meta.url).href)};
       const visits = new Map();
       const connect = chromium.connectOverCDP.bind(chromium);
       chromium.connectOverCDP = async (endpoint, options) => {
         const port = new URL(endpoint).port;
-        const directory = process.argv.filter((value,index) => process.argv[index-1] === '--profile')
-          .find(path => existsSync(join(path,'DevToolsActivePort')) &&
-            readFileSync(join(path,'DevToolsActivePort'),'utf8').split(/\\r?\\n/)[0] === port);
-        assert.ok(directory, 'CDP must attach only to an explicitly selected profile.');
-        const name = basename(directory);
+        const directory = listProfiles(profileRoot()).map(profile => profile.path)
+          .find(path => existsSync(join(path, 'DevToolsActivePort')) &&
+            readFileSync(join(path, 'DevToolsActivePort'), 'utf8').split(/\\r?\\n/)[0] === port);
+        assert.ok(directory, 'CDP must attach only to a marked profile.');
+        const name = basename(directory).replace(/^\\d+-/, '');
         const visit = (visits.get(name) ?? 0) + 1;
         visits.set(name, visit);
         const details = { profile: name, session: visit };
@@ -175,26 +177,23 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
     ];
     for (const [index, scenario] of scenarios.entries()) {
       await t.test(scenario.names.join(', '), () => {
-        const root = join(temporary, String(index), 'profiles');
-        const profiles = scenario.names.map(name => {
-          const path = join(root, name);
-          mkdirSync(path, { recursive: true });
-          return { name, path };
-        });
+        const localAppData = join(temporary, String(index), 'localappdata');
+        const root = join(localAppData, 'chatgpt-cli', 'profiles');
+        const profiles = scenario.names.map((name, order) => createNamedProfile(root, `${order + 1}-${name}`));
         const planned = generateBatches(profiles.map(profile => profile.path.toLowerCase()), 'fixture', 25);
         const pacing = join(temporary, String(index), 'pacing.mjs');
         writeFileSync(pacing, sendPacingFixture(scenario.realDelays));
-        const localAppData = join(temporary, String(index), 'localappdata');
         const result = spawnSync(process.execPath, ['--import', pathToFileURL(pacing).href,
-          '--import', pathToFileURL(preload).href, cli, 'send',
-          ...profiles.flatMap(profile => ['--profile', profile.path]), '--seed', 'fixture'], {
+          '--import', pathToFileURL(preload).href, cli, 'send', '--seed', 'fixture'], {
           encoding: 'utf8', timeout: scenario.realDelays ? 240_000 : 180_000,
           env: { ...process.env, LOCALAPPDATA: localAppData },
         });
         assert.equal(result.error, undefined, result.stdout + result.stderr);
         assert.equal(result.status, scenario.status, result.stdout + result.stderr);
-        const records = result.stdout.trim().split('\n').map(line => JSON.parse(line));
-        const visitOf = (record: { profile: string; session: number }) => `${record.profile}:${record.session}`;
+        assert.match(result.stderr, /Warning: send closes open Edge windows/);
+        const records = result.stdout.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line));
+        const nameOf = (record: { profile: string }) => record.profile.replace(/^\d+-/, '');
+        const visitOf = (record: { profile: string; session: number }) => `${nameOf(record)}:${record.session}`;
         const visitsFor = (event: string) => records.filter(record => record.event === event).map(visitOf);
         const skipped = scenario.skipped ?? [];
         const failed = scenario.failed ?? [];
@@ -235,11 +234,11 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
             event === 'sending' || event === 'fixture-submitted' ? attempts : completions, result.stdout + result.stderr);
         }
         for (const record of records.filter(record => record.event === 'sending')) {
-          const profile = scenario.names.indexOf(record.profile);
+          const profile = scenario.names.indexOf(nameOf(record));
           assert.equal(record.promptId, planned[profile]![(record.session - 1) * 5 + record.round - 1]!.id);
         }
         for (const record of records.filter(record => record.event === 'completed')) {
-          assert.equal(new URL(record.url).pathname, `/c/${record.profile}-${record.session}`);
+          assert.equal(new URL(record.url).pathname, `/c/${nameOf(record)}-${record.session}`);
         }
         assert.equal(new Set(records.filter(record => record.event === 'sending').map(record => record.promptId)).size, attempts.length);
         const realBoundaries: string[] = [];
@@ -271,14 +270,14 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
           assert.equal(records.slice(stopped).some(record => ['sending', 'fixture-submitted', 'session-started'].includes(record.event)), false);
         }
         if (scenario.names.includes('challenge')) {
-          const diagnostics = records.filter(record => record.event === 'challenge' && record.profile === 'challenge');
+          const diagnostics = records.filter(record => record.event === 'challenge' && nameOf(record) === 'challenge');
           assert.ok(diagnostics.some(record => record.phase === 'response' && record.stage === 'navigation' &&
             record.response.request === 'document' && record.response.status === 403));
           assert.ok(diagnostics.some(record => record.phase === 'waiting' &&
             record.indicators.includes('response') && record.indicators.includes('text')));
           for (let session = 1; session <= 5; session++) {
             const cleared = records.findIndex(record => record.event === 'challenge' && record.session === session &&
-              record.profile === 'challenge' && record.phase === 'cleared');
+              nameOf(record) === 'challenge' && record.phase === 'cleared');
             const submitted = records.findIndex(record => record.event === 'fixture-submitted' &&
               record.profile === 'challenge' && record.session === session);
             assert.ok(cleared >= 0 && submitted > cleared);
@@ -290,7 +289,7 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
         const persisted = readFileSync(records.find(record => record.event === 'started').logFile, 'utf8')
           .trim().split('\n').map(line => JSON.parse(line));
         assert.deepEqual(persisted, records.filter(record => !record.event.startsWith('fixture-')));
-        assert.deepEqual(readdirSync(join(localAppData, 'chatgpt-cli')), ['logs']);
+        assert.deepEqual(readdirSync(join(localAppData, 'chatgpt-cli')).sort(), ['logs', 'profiles']);
         assert.equal(existsSync(join(localAppData, 'gpt-usage')), false);
       });
     }

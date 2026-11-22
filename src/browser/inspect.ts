@@ -66,6 +66,7 @@ export async function inspectProfile(profile: Profile, options: AccessOptions & 
   let edge: Awaited<ReturnType<typeof launchProfile>> | undefined;
   let observation: ReturnType<typeof observeAccount> | undefined;
   try {
+    assertIdentity(profile);
     claimAccess(profile.path);
     edge = await launchProfile(profile);
     const page = edge.context.pages()[0];
@@ -116,7 +117,6 @@ export async function* inspectProfiles(profiles: Profile[], inspect: (profile: P
   let finished: number | undefined;
   for (const profile of profiles) {
     if (finished !== undefined) await setTimeout(Math.max(0, 30_000 - (Date.now() - finished)));
-    if (profile.id === undefined) throw new Error('Collection inspection requires a marked profile.');
     assertIdentity(profile);
     const inspection = await inspect(profile);
     finished = Date.now();
