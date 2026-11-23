@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { readPromptHistory } from '../src/prompts/history.ts';
+import { failureCooldownMs, readPromptHistory } from '../src/prompts/history.ts';
 
 const line = (event: string, time: string, promptId?: string) => JSON.stringify({ event, time, promptId });
 
@@ -37,24 +37,44 @@ test('history uses latest attempted sends, including failures and uncertain outc
   } finally { rmSync(temporary, { recursive: true, force: true }); }
 });
 
-test('automatic replay requires a successful finish after the latest attempted send', () => {
+test('incomplete or failed sends enforce a cooldown that expires and cannot be cleared by non-send logs', () => {
   const directory = mkdtempSync('C:/dev/tmp/chatgpt-partial-send-');
   try {
     const previous = join(directory, 'z.jsonl');
-    const attempted = line('sending', '2026-01-01T00:00:01Z', 'first');
+    const startedAt = Date.parse('2026-01-01T00:00:01.000Z');
+    const attempted = line('sending', '2026-01-01T00:00:01.000Z', 'first');
     const success = JSON.stringify({ event: 'finished', success: true });
-    const failure = JSON.stringify({ event: 'finished', success: false });
+    const failure = JSON.stringify({ event: 'finished', success: false, time: '2026-01-01T00:00:03.000Z' });
     writeFileSync(previous, attempted); // Interrupted before completion.
-    assert.throws(() => readPromptHistory(directory, true), /Automatic replay refused/);
-    writeFileSync(previous, [attempted, line('sent', '2026-01-01T00:00:02Z', 'first'), failure].join('\n'));
-    writeFileSync(join(directory, 'login.jsonl'), success);
-    assert.throws(() => readPromptHistory(directory, true), /Automatic replay refused/);
+    assert.throws(() => readPromptHistory(directory, failureCooldownMs, startedAt + 5 * 60_000), /cooling down until/);
+    assert.equal(readPromptHistory(directory, failureCooldownMs, startedAt + failureCooldownMs).size, 1);
+
+    writeFileSync(previous, [attempted, line('sent', '2026-01-01T00:00:02.000Z', 'first'), failure].join('\n'));
+    writeFileSync(join(directory, 'open.jsonl'), [
+      JSON.stringify({ event: 'started', command: 'open', time: '2026-01-01T00:05:00.000Z' }),
+      JSON.stringify({ event: 'finished', success: true, time: '2026-01-01T00:05:01.000Z' }),
+    ].join('\n'));
+    const failedAt = Date.parse('2026-01-01T00:00:03.000Z');
+    assert.throws(() => readPromptHistory(directory, failureCooldownMs, failedAt + 29 * 60_000), /cooling down until/);
     assert.equal(readPromptHistory(directory).size, 1); // Preview remains available.
+    assert.equal(readPromptHistory(directory, failureCooldownMs, failedAt + failureCooldownMs).size, 1);
+
+    // A send run that fails before any submission (e.g. Cloudflare on profile 1) also cools down.
+    const blocked = join(directory, 'blocked.jsonl');
+    const blockedAt = Date.parse('2026-01-01T02:00:05.000Z');
+    writeFileSync(blocked, [
+      JSON.stringify({ event: 'started', command: 'send', time: '2026-01-01T02:00:00.000Z' }),
+      JSON.stringify({ event: 'finished', success: false, time: '2026-01-01T02:00:05.000Z' }),
+    ].join('\n'));
+    assert.throws(() => readPromptHistory(directory, failureCooldownMs, blockedAt + 5 * 60_000), /cooling down until/);
+    assert.equal(readPromptHistory(directory, failureCooldownMs, blockedAt + failureCooldownMs).size, 1);
+
+    // Equal timestamps fail closed during cooldown, and a newer completed send clears it immediately.
     const next = join(directory, 'a.jsonl');
-    writeFileSync(next, [attempted, success].join('\n'));
-    assert.throws(() => readPromptHistory(directory, true), /Automatic replay refused/); // Equal timestamps fail closed.
-    writeFileSync(next, [line('sending', '2026-01-02T00:00:01Z', 'second'), success].join('\n'));
-    assert.equal(readPromptHistory(directory, true).size, 2);
+    writeFileSync(next, [line('sending', '2026-01-01T02:00:05.000Z', 'tied'), success].join('\n'));
+    assert.throws(() => readPromptHistory(directory, failureCooldownMs, blockedAt + 5 * 60_000), /cooling down until/);
+    writeFileSync(next, [line('sending', '2026-01-01T02:01:00.000Z', 'second'), success].join('\n'));
+    assert.equal(readPromptHistory(directory, failureCooldownMs, Date.parse('2026-01-01T02:02:00.000Z')).size, 2);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

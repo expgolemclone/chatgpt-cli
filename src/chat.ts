@@ -1,12 +1,13 @@
 import { basename } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
-import type { Locator, Page, Response } from 'playwright';
+import type { JSHandle, Locator, Page, Response } from 'playwright';
 import type { Prompt } from './prompts/generate.ts';
 import { AccessBlockedError, CloudflareChallengeError, assertAccess, loginControl, observeAccount,
   type AccessOptions, type ChallengeEvent } from './browser/account.ts';
 import { classifyProfile } from './browser/inspect.ts';
 
 export class ProfileNotReadyError extends Error {}
+export class LoginRequiredError extends ProfileNotReadyError {}
 export class NonFreeAccountError extends Error {}
 
 export interface ChatOptions extends AccessOptions {
@@ -25,10 +26,16 @@ async function composerText(composer: Locator): Promise<string> {
       ? element.value : element instanceof HTMLElement ? element.innerText : element.textContent ?? '');
 }
 
-function hasCompletedReply(turns: Locator, previous: number, submitted: string | null): Promise<boolean> {
-  return turns.evaluateAll((elements, { previous, submitted }) => {
-    const turn = elements[previous];
-    if (elements.length !== previous + 1 || turn?.getAttribute('data-talvt-turn-state') !== 'complete') return false;
+function hasCompletedReply(
+  page: Page,
+  prior: JSHandle<Set<Element>> | null,
+  submitted: string | null,
+): Promise<boolean> {
+  return page.evaluate(({ prior, submitted }) => {
+    const elements = Array.from(document.querySelectorAll('[data-talvt-turn-state]'));
+    const turn = elements.at(-1);
+    if (!turn || (prior ? prior.has(turn) : submitted !== null && elements.length !== 1)
+        || turn.getAttribute('data-talvt-turn-state') !== 'complete') return false;
     if (submitted !== null) {
       const bubble = turn.querySelector<HTMLElement>('[data-user-message-bubble], [data-message-author-role="user"]');
       const normalize = (value: string) => value.replace(/\s+/g, ' ').trim();
@@ -42,7 +49,7 @@ function hasCompletedReply(turns: Locator, previous: number, submitted: string |
     if (!gallery) return turn.querySelector('[data-conversation-role="assistant"]') !== null;
     return Array.from(gallery.querySelectorAll<HTMLImageElement>('[data-testid="generated-image-preview"] img'))
       .some(image => image.complete && image.naturalWidth > 0);
-  }, { previous, submitted });
+  }, { prior, submitted });
 }
 
 interface ImageTurn {
@@ -87,7 +94,7 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
     if (image && new URL(page.url()).origin !== origin) throw new ProfileNotReadyError('Chat origin changed; check the selected profile.');
     if (!image && account.plan?.sending === 'non-free') throw new NonFreeAccountError('Non-free account detected; this profile will be skipped.');
     if (await login.isVisible()) {
-      throw new ProfileNotReadyError('Login required; manual login is needed.');
+      throw new LoginRequiredError('Login required; manual login is needed.');
     }
     return pausedMs;
   };
@@ -127,7 +134,6 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
         throw error;
       }
       stage = 'submission';
-      const previousTurns = await turns.count();
       const references = image?.references ?? [];
       const names = references.map(file => basename(file));
       const form = page.locator('form').filter({ has: composer });
@@ -141,7 +147,7 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
             img.alt === name || img.alt.replace(/ ?\(\d+\)(?=\.[^.]+$)/, '') === name));
           return matched.every(matches => matches.length === 1) && new Set(matched.flat()).size === expected.length;
         }, names));
-      if (image && (previousTurns !== 0 || new URL(page.url()).pathname !== '/' || (await composerText(composer)).trim() || await attachments.count())) {
+      if (image && (await turns.count() !== 0 || new URL(page.url()).pathname !== '/' || (await composerText(composer)).trim() || await attachments.count())) {
         throw new ProfileNotReadyError('Expected an empty new chat; leave any existing draft untouched.');
       }
       if (references.length) {
@@ -177,30 +183,37 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
         throw new ProfileNotReadyError('Chat or attachments changed before submission.');
       }
       if (!hasRequiredPlan()) throw new ProfileNotReadyError('Required account plan is no longer confirmed; no message will be sent.');
-      options.onEvent?.('sending', prompt);
-      let acknowledgement: Response;
+      const priorTurns = await turns.count() > 0
+        ? await page.evaluateHandle(() => new Set(Array.from(document.querySelectorAll('[data-talvt-turn-state]'))))
+        : null;
       try {
-        // UI updates are optimistic. Confirm server acceptance separately from answer completion.
-        [acknowledgement] = await Promise.all([
-          page.waitForResponse(response => {
-            const target = new URL(response.url());
-            return target.origin === origin && target.pathname === '/backend-api/f/conversation' &&
-              response.request().method() === 'POST';
-          }, actionOptions),
-          send.click(actionOptions), // Never retry an uncertain submission.
-        ]);
-      } catch (error) {
+        options.onEvent?.('sending', prompt);
+        let acknowledgement: Response;
+        try {
+          // UI updates are optimistic. Confirm server acceptance separately from answer completion.
+          [acknowledgement] = await Promise.all([
+            page.waitForResponse(response => {
+              const target = new URL(response.url());
+              return target.origin === origin && target.pathname === '/backend-api/f/conversation' &&
+                response.request().method() === 'POST';
+            }, actionOptions),
+            send.click(actionOptions), // Never retry an uncertain submission.
+          ]);
+        } catch (error) {
+          await guard();
+          throw new Error(`Submission acknowledgement failed. No automatic resend will be attempted. ${String(error)}`);
+        }
         await guard();
-        throw new Error(`Submission acknowledgement failed. No automatic resend will be attempted. ${String(error)}`);
+        if (!acknowledgement.ok()) {
+          throw new Error(`Submission rejected: HTTP ${acknowledgement.status()}. No automatic resend will be attempted.`);
+        }
+        stage = 'answer';
+        options.onEvent?.('sent', prompt);
+        await waitUntil(async () => !(await stopped.isVisible()) && hasCompletedReply(page, priorTurns, image ? filledText : null),
+          answerTimeoutMs, 'Assistant answer');
+      } finally {
+        await priorTurns?.dispose().catch(() => {});
       }
-      await guard();
-      if (!acknowledgement.ok()) {
-        throw new Error(`Submission rejected: HTTP ${acknowledgement.status()}. No automatic resend will be attempted.`);
-      }
-      stage = 'answer';
-      options.onEvent?.('sent', prompt);
-      const replyReady = async () => !(await stopped.isVisible()) && hasCompletedReply(turns, previousTurns, image ? filledText : null);
-      await waitUntil(replyReady, answerTimeoutMs, 'Assistant answer');
       if (image) {
         // The streamed preview can look complete before its download viewer is usable.
         // Open the saved conversation with a GET; never submit the prompt again.
@@ -211,11 +224,11 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
         await page.goto(origin + saved.pathname, { waitUntil: 'domcontentloaded', ...actionOptions });
         await waitUntil(async () => {
           if (new URL(page.url()).pathname !== saved.pathname) throw new ProfileNotReadyError('Saved conversation changed.');
-          return hasRequiredPlan() && await replyReady();
+          return hasRequiredPlan() && !(await stopped.isVisible()) && hasCompletedReply(page, null, filledText);
         }, readyTimeoutMs, 'Saved image reply');
         await guard();
         if (!hasRequiredPlan()) throw new ProfileNotReadyError('Account can no longer be confirmed.');
-        await image.save(turns.nth(previousTurns));
+        await image.save(turns.last());
       }
       options.onEvent?.('completed', prompt);
     }

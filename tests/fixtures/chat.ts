@@ -75,7 +75,13 @@ export function fixture(mode: string): string {
       user.textContent = text;
       if (mode === 'image-refs') user.append(' … 展開');
       turn.append(user);
-      document.querySelector('main').append(turn);
+      const main = document.querySelector('main');
+      main.append(turn);
+      if (mode === 'virtualized') {
+        while (main.querySelectorAll('[data-talvt-turn-state]').length > 2) {
+          main.querySelector('[data-talvt-turn-state]').remove();
+        }
+      }
       composer.textContent = '';
       const stop = document.createElement('button');
       stop.dataset.testid = 'stop-button';

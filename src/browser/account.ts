@@ -6,7 +6,8 @@ export class CloudflareChallengeError extends AccessBlockedError {}
 const loginName = /^(Log in(?: or sign up)?|Sign in|ログイン(?:または新規登録)?)$/i;
 export const emailPattern = /^[^@\s]+@[^@\s]+$/;
 const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ/i;
-const challengeText = /verify (?:that )?you are human|verifying (?:that )?you are human|checking your browser|performing security verification|人間であることを確認/i;
+const challengeText = /verify (?:that )?you are human|verifying (?:that )?you are human|checking your browser|performing security verification|人間であることを確認|セキュリティ検証を実行|ブラウザを確認|接続のセキュリティを確認/i;
+const challengeTitle = /^(?:just a moment\.{0,3}|attention required!?(?:\s*\|.*)?|しばらくお待ちください(?:\.{0,3}|\u2026)?|ご注意ください(?:[!\uFF01]?(?:\s*\|.*)?)?)$/i;
 const accessText = new RegExp(`${blockedText.source}|${challengeText.source}`, 'i');
 const conversationContent = '[data-talvt-turn-state], [data-message-author-role], [data-user-message-bubble], [role="textbox"], nav, aside';
 
@@ -187,7 +188,7 @@ export async function assertAccess(page: Page, account: Account, options: Access
       const responses = [...(account.challenges?.values() ?? [])];
       if (responses.length) indicators.push('response');
       if (notices.some(text => challengeText.test(text))) indicators.push('text');
-      if (/^(?:just a moment\.{0,3}|attention required!?(?:\s*\|.*)?)$/i.test((await page.title()).trim())) indicators.push('title');
+      if (challengeTitle.test((await page.title()).trim())) indicators.push('title');
       for (const frame of page.frames()) {
         if (frame !== page.mainFrame() && /^https:\/\/challenges\.cloudflare\.com(?::443)?\//i.test(frame.url())) {
           try {

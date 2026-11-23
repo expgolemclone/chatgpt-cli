@@ -93,26 +93,31 @@ export function isProfileRunning(profile: Profile): boolean {
 export async function terminateProfiles(profiles: Profile[]): Promise<{ profile: Profile; pid: number }[]> {
   if (!profiles.length) return [];
   for (const profile of profiles) assertIdentity(profile);
-  const targets: { profile: Profile; pid: number; handle: number | bigint }[] = [];
-  try {
-    for (const { profile, pid } of runningProfileProcesses(profiles)) {
-      const owned: number | bigint = open(0x1 | 0x100000 /* TERMINATE | SYNCHRONIZE */, 0, pid);
-      if (!owned) throw new Error('Cannot terminate the selected Edge profile; no prompts will be sent.');
-      targets.push({ profile, pid, handle: owned });
-    }
-    // Finish selection before terminating anything, so discovery/permission errors cannot partially kill the batch.
-    for (const target of targets) {
-      if (wait(target.handle, 0) !== 0 && !terminate(target.handle, 1) && wait(target.handle, 0) !== 0) {
-        throw new Error('Selected Edge profile could not be terminated; no prompts will be sent.');
+  const terminated: { profile: Profile; pid: number }[] = [];
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const targets: { profile: Profile; pid: number; handle: number | bigint }[] = [];
+    try {
+      for (const { profile, pid } of runningProfileProcesses(profiles)) {
+        const owned: number | bigint = open(0x1 | 0x100000 /* TERMINATE | SYNCHRONIZE */, 0, pid);
+        if (!owned) throw new Error('Cannot terminate the selected Edge profile; no prompts will be sent.');
+        targets.push({ profile, pid, handle: owned });
       }
+      if (!targets.length) return terminated;
+      // Finish selection before terminating anything, so discovery/permission errors cannot partially kill the batch.
+      for (const target of targets) {
+        if (wait(target.handle, 0) !== 0 && !terminate(target.handle, 1) && wait(target.handle, 0) !== 0) {
+          throw new Error('Selected Edge profile could not be terminated; no prompts will be sent.');
+        }
+      }
+      while (targets.some(target => wait(target.handle, 0) !== 0)) {
+        if (Date.now() >= deadline) throw new Error('Selected Edge profiles did not exit; no prompts will be sent.');
+        await setTimeout(100);
+      }
+      terminated.push(...targets.map(({ profile, pid }) => ({ profile, pid })));
+    } finally {
+      for (const target of targets) close(target.handle);
     }
-    const deadline = Date.now() + 10_000;
-    while (targets.some(target => wait(target.handle, 0) !== 0)) {
-      if (Date.now() >= deadline) throw new Error('Selected Edge profiles did not exit; no prompts will be sent.');
-      await setTimeout(100);
-    }
-    return targets.map(({ profile, pid }) => ({ profile, pid }));
-  } finally {
-    for (const target of targets) close(target.handle);
+    if (Date.now() >= deadline) throw new Error('Selected Edge profiles did not exit; no prompts will be sent.');
   }
 }

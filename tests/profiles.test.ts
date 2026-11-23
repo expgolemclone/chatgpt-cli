@@ -24,7 +24,7 @@ interface Scenario {
 const allVisits = (...names: string[]) => Array.from({ length: 5 }, (_, session) =>
   names.map(name => `${name}:${session + 1}`)).flat();
 
-test('five round-robin loops finish five rounds per session, skip non-free accounts, and stop on the first failure', async t => {
+test('five round-robin loops finish five rounds per session, skip non-free and initial signed-out accounts, and stop on failures', async t => {
   const temporary = mkdtempSync('C:/dev/tmp/gpt-message-profiles-test-');
   try {
     const preload = join(temporary, 'fixture.mjs');
@@ -149,7 +149,7 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
       { names: ['challenge-loop-cleanup-error', 'waiting'], visits: ['challenge-loop-cleanup-error:1'],
         status: 1, failed: ['challenge-loop-cleanup-error:1'], stopped: true },
       { names: ['feature-limited'], visits: allVisits('feature-limited'), status: 0 },
-      { names: ['login', 'free'], visits: ['login:1'], status: 1, failed: ['login:1'], stopped: true },
+      { names: ['login', 'free'], visits: ['login:1', ...allVisits('free')], status: 0, skipped: ['login:1'] },
       { names: ['cleanup-error', 'free'], visits: ['cleanup-error:1'], status: 1, failed: ['cleanup-error:1'],
         stopped: true, attempts: { 'cleanup-error:1': 5 }, completions: { 'cleanup-error:1': 5 } },
       { names: ['blocked', 'waiting'], visits: ['blocked:1'], status: 1, failed: ['blocked:1'], stopped: true },
@@ -173,7 +173,7 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
         status: 1, failed: ['late-cleanup-error:2'], stopped: true,
         attempts: { 'late-cleanup-error:2': 5 }, completions: { 'late-cleanup-error:2': 5 } },
       { names: ['free-a', 'free-b', 'paid'], visits: ['free-a:1', 'free-b:1', 'paid:1', ...allVisits('free-a', 'free-b').slice(2)],
-        status: 0, skipped: ['paid:1'], realDelays: [5, 10] },
+        status: 0, skipped: ['paid:1'], realDelays: [1, 5] },
     ];
     for (const [index, scenario] of scenarios.entries()) {
       await t.test(scenario.names.join(', '), () => {
@@ -241,6 +241,20 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
           assert.equal(new URL(record.url).pathname, `/c/${nameOf(record)}-${record.session}`);
         }
         assert.equal(new Set(records.filter(record => record.event === 'sending').map(record => record.promptId)).size, attempts.length);
+        // Every subsequent profile visit waits 30-45s after the previous Edge browser closed.
+        const starts = records.map((record, position) => ({ record, position }))
+          .filter(({ record }) => record.event === 'session-started');
+        for (let visitIndex = 1; visitIndex < starts.length; visitIndex++) {
+          const previousStart = starts[visitIndex - 1]!.position;
+          const currentStart = starts[visitIndex]!.position;
+          const closed = records.slice(previousStart, currentStart).findLastIndex(record => record.event === 'fixture-profile-closed');
+          assert.ok(closed >= 0);
+          const closedPosition = previousStart + closed;
+          const visitDelays = records.slice(closedPosition + 1, currentStart).filter(record => record.event === 'fixture-send-delay');
+          assert.equal(visitDelays.length, 1, `Expected one inter-visit delay before ${visitOf(starts[visitIndex]!.record)}`);
+          const delay = visitDelays[0]!;
+          assert.ok(delay.delay >= 29_500 && delay.delay <= 45_000, `Unexpected inter-visit delay: ${delay.delay}`);
+        }
         const realBoundaries: string[] = [];
         let previous = -1;
         for (const [position, record] of records.entries()) {
@@ -248,12 +262,14 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
           if (previous >= 0) {
             const earlier = records[previous];
             const delays = records.slice(previous + 1, position).filter(record => record.event === 'fixture-send-delay');
+            const lastSessionStart = records.slice(0, position).findLastIndex(record => record.event === 'session-started');
+            const sendDelays = records.slice(Math.max(previous, lastSessionStart) + 1, position)
+              .filter(record => record.event === 'fixture-send-delay');
             const elapsed = Date.parse(record.time) - Date.parse(earlier.time);
-            assert.ok(delays.length <= 1);
+            assert.ok(sendDelays.length <= 1);
             if (delays.length === 0) assert.ok(elapsed >= 29_900, 'No boundary may reset the global send clock.');
             for (const delay of delays) {
-              assert.ok(delay.delay > 0 && delay.delay <= 30_000);
-              assert.ok(Math.abs(delay.time + delay.delay - Date.parse(earlier.time) - 30_000) < 100);
+              assert.ok(delay.delay > 0 && delay.delay <= 45_000);
               if (delay.real) {
                 assert.ok(elapsed >= 29_900, `${elapsed}ms between submissions`);
                 realBoundaries.push(`${visitOf(earlier)}:${earlier.round}->${visitOf(record)}:${record.round}`);
@@ -262,7 +278,7 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
           }
           previous = position;
         }
-        assert.deepEqual(realBoundaries, scenario.realDelays ? ['free-a:1:5->free-b:1:1', 'free-b:1:5->free-a:2:1'] : []);
+        assert.deepEqual(realBoundaries, scenario.realDelays ? ['free-a:1:1->free-a:1:2', 'free-a:1:5->free-b:1:1'] : []);
         assert.equal(records.filter(record => record.event === 'batch-stopped').length, scenario.stopped ? 1 : 0);
         const stopped = records.findIndex(record => record.event === 'batch-stopped');
         if (stopped >= 0) {
@@ -293,6 +309,20 @@ test('five round-robin loops finish five rounds per session, skip non-free accou
         assert.equal(existsSync(join(localAppData, 'gpt-usage')), false);
       });
     }
+    await t.test('explicit --profile still fails when the selected profile requires login', () => {
+      const localAppData = join(temporary, 'explicit-login', 'localappdata');
+      const root = join(localAppData, 'chatgpt-cli', 'profiles');
+      const profile = createNamedProfile(root, '1-login');
+      const pacing = join(temporary, 'explicit-login', 'pacing.mjs');
+      writeFileSync(pacing, sendPacingFixture());
+      const result = spawnSync(process.execPath, ['--import', pathToFileURL(pacing).href,
+        '--import', pathToFileURL(preload).href, cli, 'send', '--profile', profile.name, '--seed', 'fixture'], {
+        encoding: 'utf8', timeout: 60_000, env: { ...process.env, LOCALAPPDATA: localAppData },
+      });
+      assert.equal(result.error, undefined, result.stdout + result.stderr);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, /Sign in with chatgpt-cli login --profile "1-login"/);
+    });
   } finally {
     rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }

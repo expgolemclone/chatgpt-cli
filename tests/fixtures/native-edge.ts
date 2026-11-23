@@ -29,12 +29,16 @@ export const manualPreload = `
 `;
 
 export async function closeWindow(pid: number): Promise<void> {
-  try { process.kill(pid, 0); } catch { return; }
-  // Gracefully close only the disposable window started by this test, so browser data is flushed.
-  execFileSync('taskkill.exe', ['/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
   const deadline = Date.now() + 15_000;
+  let lastSignal = 0;
   while (Date.now() < deadline) {
     try { process.kill(pid, 0); } catch { return; }
+    if (Date.now() - lastSignal >= 500) {
+      // Gracefully close each top-level window of the disposable browser so browser data is flushed.
+      try { execFileSync('taskkill.exe', ['/PID', String(pid)], { stdio: 'ignore', windowsHide: true }); }
+      catch { /* The process may exit between liveness check and taskkill. */ }
+      lastSignal = Date.now();
+    }
     await setTimeout(100);
   }
   throw new Error('Disposable ordinary Edge window did not close.');

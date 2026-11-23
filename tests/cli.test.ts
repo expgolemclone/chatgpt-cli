@@ -34,8 +34,10 @@ test('the standalone CLI discovers the default collection and validates each com
       assert.match(send.stdout, /--dry-run/);
       assert.match(send.stdout, /closes any open Edge windows in the selected dedicated profiles/);
       assert.match(send.stdout, /5 loops, with 5 rounds per visit and at least 30 seconds/);
+      assert.match(send.stdout, /non-free and initially signed-out profiles are skipped/);
       assert.match(send.stdout, /without interacting with verification controls/);
       assert.match(send.stdout, /five consecutive Cloudflare challenge responses/);
+      assert.match(send.stdout, /cool down for 30 minutes/);
       assert.doesNotMatch(send.stdout, /--apply|--reference/);
       assert.match(run('profiles', '--help').stdout, /Commands:[\s\S]*check[\s\S]*sync[\s\S]*prune/);
       assert.match(run('profiles', 'prune', '-h').stdout, /--apply[\s\S]*five-minute inspection cooldown/);
@@ -103,9 +105,9 @@ test('the standalone CLI discovers the default collection and validates each com
       for (const profile of profiles) assert.deepEqual(readdirSync(profile.path), ['.gpt-usage-id']);
     });
 
-    await t.test('preview uses attempted history and live unattended replay is refused without opening Edge', () => {
+    await t.test('preview uses attempted history and live unattended replay cools down without opening Edge', () => {
       const attempted = generateBatches(ids, 'history', 25)[0]![0]!.id;
-      const time = '2026-01-01T00:00:00.000Z';
+      const time = new Date().toISOString();
       const contents = [
         JSON.stringify({ event: 'sending', time, promptId: attempted }),
         JSON.stringify({ event: 'profile-failed', time }),
@@ -122,7 +124,7 @@ test('the standalone CLI discovers the default collection and validates each com
       for (const args of [[], ['--profile', names[0]!]]) {
         const retry = run('send', ...args);
         assert.equal(retry.status, 1);
-        assert.match(retry.stderr, /Automatic replay refused/);
+        assert.match(retry.stderr, /cooling down until/);
         assert.equal(retry.stdout, '');
       }
       assert.deepEqual(readdirSync(logs), ['old.jsonl']);

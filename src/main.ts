@@ -116,10 +116,11 @@ const commands: Record<string, Command> = {
     options: { 'dry-run': flags['dry-run'], profile: flags.profile, seed: flags.seed },
     notes: [
       'Start with --dry-run. A live send closes any open Edge windows in the selected dedicated profiles.',
-      'It visits Free profiles in 5 loops, with 5 rounds per visit and at least 30 seconds between submissions.',
+      'It visits Free profiles in 5 loops, with 5 rounds per visit and at least 30 seconds (plus jitter) between profile visits and submissions.',
+      'In collection runs, non-free and initially signed-out profiles are skipped.',
       'Uses a non-elevated terminal. Checks challenges without interacting with verification controls.',
       'Stops on five consecutive Cloudflare challenge responses or other unresolved access or session failures.',
-      'After a partial send, collection-wide and unattended replays are refused.',
+      'After an incomplete send, collection-wide and unattended runs cool down for 30 minutes.',
     ].join('\n'),
     async run(root, { profile: name, seed, 'dry-run': dryRun }) {
       const { send } = await import('./send.ts');

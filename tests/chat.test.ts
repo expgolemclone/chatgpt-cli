@@ -43,6 +43,9 @@ test('access checks ignore conversation text but still detect actual warnings', 
     await page.setContent('<!doctype html><title>Just a moment...</title><body>Verify you are human</body>');
     await assert.rejects(assertAccess(page, {}, options),
       (error: unknown) => error instanceof AccessBlockedError && /Cloudflare challenge timed out/.test(error.message));
+    await page.setContent('<!doctype html><title>しばらくお待ちください...</title><body>セキュリティ検証を実行しています</body>');
+    await assert.rejects(assertAccess(page, {}, options),
+      (error: unknown) => error instanceof AccessBlockedError && /Cloudflare challenge timed out/.test(error.message));
     await assert.rejects(assertAccess(page, { block: { status: 429, path: '/backend-api/me' } }, options),
       (error: unknown) => error instanceof AccessBlockedError && /HTTP 429/.test(error.message));
   } finally {
@@ -723,6 +726,23 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         assert.deepEqual(sent, [prompt.text], value);
         assert.deepEqual(events, ['sending', 'sent'], value);
       }
+    });
+    await t.test('completes all five rounds when older turns are virtualized out of the DOM', async () => {
+      sent.length = 0; mode = 'virtualized';
+      const prompts = [
+        { id: 'r1', text: 'Round 1' },
+        { id: 'r2', text: 'Round 2' },
+        { id: 'r3', text: 'Round 2' }, // Identical text to previous turn still requires a newly mounted turn.
+        { id: 'r4', text: 'Round 4' },
+        { id: 'r5', text: 'Round 5' },
+      ];
+      const events: string[] = [];
+      await runChat(page, prompts, {
+        ...options, onEvent: (event, item) => events.push(`${event}:${item.id}`),
+      });
+      assert.deepEqual(sent, prompts.map(item => item.text));
+      assert.deepEqual(events, prompts.flatMap(item => [`sending:${item.id}`, `sent:${item.id}`, `completed:${item.id}`]));
+      assert.equal(await page.locator('[data-talvt-turn-state="complete"]').count(), 2);
     });
     await t.test('an old completed turn cannot satisfy the new answer wait', async () => {
       mode = 'no-answer'; sent.length = 0;
