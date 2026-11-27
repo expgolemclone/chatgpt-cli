@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
-import { AccessBlockedError, assertAccess, loginControl, observeAccount, type AccessOptions, type Account } from './account.ts';
+import { AccessBlockedError, assertAccess, isAllowedOrigin, isLoginSurface, observeAccount, type AccessOptions, type Account } from './account.ts';
 import { launchProfile } from './edge.ts';
 import { assertIdentity, assertProfileDirectory, type Profile } from './profiles.ts';
 import { readRegularFile, replaceRegularFile } from '../storage/files.ts';
@@ -79,19 +79,31 @@ export async function inspectProfile(profile: Profile, options: AccessOptions & 
     const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
     if (!response) throw new InspectionError('navigation_http_none');
     const { account } = observation;
-    const login = loginControl(page);
     let loginSince: number | undefined;
     let deadline = Date.now() + (options.readyTimeoutMs ?? 15_000);
     for (;;) {
       const waited = await assertAccess(page, account, options);
       deadline += waited;
-      const visible = await login.isVisible();
+      let visible: boolean;
+      try {
+        visible = await isLoginSurface(page, origin);
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('Execution context was destroyed') && Date.now() < deadline) {
+          await setTimeout(250);
+          continue;
+        }
+        throw error;
+      }
       // A restriction can arrive while reading the login control.
       if (account.block || account.challengeLimit || account.challenges?.size) continue;
       const now = Date.now();
       loginSince = visible ? (waited ? now : loginSince ?? now) : undefined;
-      if (account.navigationStatus !== 200) throw new InspectionError(`navigation_http_${account.navigationStatus}`);
-      if (new URL(page.url()).origin !== origin) throw new InspectionError('navigation_origin_changed');
+      const redirecting = account.navigationStatus !== undefined &&
+        account.navigationStatus >= 300 && account.navigationStatus < 400;
+      if (account.navigationStatus !== 200 && (!redirecting || now >= deadline)) {
+        throw new InspectionError(`navigation_http_${account.navigationStatus}`);
+      }
+      if (!isAllowedOrigin(page.url(), origin)) throw new InspectionError('navigation_origin_changed');
       // A signed-out surface can appear briefly while authentication is still loading.
       if (now >= deadline || (account.identity?.status === 200 && account.identity.settled && account.plan?.settled)) {
         const inspection = classifyProfile(account, visible);

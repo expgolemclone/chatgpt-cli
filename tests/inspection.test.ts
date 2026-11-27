@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { parseIdentity, parsePlan, type Account } from '../src/browser/account.ts';
+import { isAllowedOrigin, isLoginUrl, parseIdentity, parsePlan, type Account } from '../src/browser/account.ts';
 import { claimAccess, classifyProfile, inspectProfile } from '../src/browser/inspect.ts';
 import { createProfile, listProfiles } from '../src/browser/profiles.ts';
 import { challengeFixture } from './fixtures/chat.ts';
@@ -45,6 +45,40 @@ test('inspection requires current native identity and never infers login or plan
     const account: Account = { identity, plan, block: { status, path: '/backend-api/me' } };
     assert.equal(classifyProfile(account, true).reason, `http_${status}`);
   }
+});
+
+test('login routes and allowed origins recognize ChatGPT and OpenAI auth pages without permitting third parties', () => {
+  const origin = 'https://chatgpt.com';
+  for (const url of [
+    'https://chatgpt.com/auth/login?next=%2Fsettings%2Faccount',
+    'https://chatgpt.com/auth/login/',
+    'https://auth.openai.com/log-in',
+    'https://auth.openai.com/log-in-or-create-account',
+    'https://auth.openai.com/u/login/identifier',
+    'https://auth0.openai.com/u/login',
+  ]) {
+    assert.equal(isAllowedOrigin(url, origin), true, url);
+    assert.equal(isLoginUrl(url, origin), true, url);
+  }
+  for (const url of [
+    'https://chatgpt.com/',
+    'https://chatgpt.com/settings/account',
+    'https://auth.openai.com/authorize?client_id=test',
+  ]) {
+    assert.equal(isAllowedOrigin(url, origin), true, url);
+    assert.equal(isLoginUrl(url, origin), false, url);
+  }
+  for (const url of [
+    'https://evil.invalid/auth/login',
+    'https://auth.openai.com.evil.invalid/log-in',
+    'about:blank',
+    'not-a-url',
+  ]) {
+    assert.equal(isAllowedOrigin(url, origin), false, url);
+    assert.equal(isLoginUrl(url, origin), false, url);
+  }
+  assert.equal(isAllowedOrigin('https://auth.openai.com/log-in', 'http://127.0.0.1:8080'), false);
+  assert.equal(isLoginUrl('http://127.0.0.1:8080/auth/login', 'http://127.0.0.1:8080'), true);
 });
 
 test('profile collection discovers only owned direct profiles and creates complete fresh identities', () => {
@@ -117,6 +151,12 @@ test('real Edge inspection observes native responses, redacts credentials, persi
       response.end(JSON.stringify({ accounts: { default: { account: {
         structure: 'personal', is_deactivated: false, plan_type: 'plus',
       } } } }));
+    } else if (mode === 'redirect-auth-login' && request.url === '/') {
+      response.writeHead(302, { location: '/auth/login?next=%2Fsettings%2Faccount' });
+      response.end();
+    } else if (request.url?.startsWith('/auth/login')) {
+      response.setHeader('content-type', 'text/html; charset=utf-8');
+      response.end('<title>ChatGPT</title><h1>ログインまたは新規登録</h1><input type="email" name="username"><button>続ける</button>');
     } else {
       response.setHeader('content-type', 'text/html');
       response.end(`<title>Local inspection fixture</title><script>
@@ -159,6 +199,11 @@ test('real Edge inspection observes native responses, redacts credentials, persi
       const access = JSON.parse(readFileSync(join(disconnected.path, '.gpt-usage-access.json'), 'utf8'));
       assert.ok(Date.parse(access.next_allowed_at) >= disconnectedAt + 30 * 60_000);
     }
+    mode = 'redirect-auth-login';
+    const redirected = createProfile(join(temporary, 'profiles'));
+    const signedOut = await inspectProfile(redirected, { url, readyTimeoutMs: 2000 });
+    assert.equal(signedOut.status, 'logged_out');
+    assert.equal(signedOut.reason, 'login_surface_without_authenticated_identity');
     mode = 'blocked';
     const blocked = createProfile(join(temporary, 'profiles'));
     const blockedAt = Date.now();

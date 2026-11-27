@@ -25,7 +25,7 @@ export async function* pruneProfiles(root: string, apply = false, inspect = insp
           ({ status, reason } = inUse);
         } else {
           assertIdentity(profile);
-          rmSync(profile.path, { recursive: true });
+          rmSync(profile.path, { recursive: true, maxRetries: 10, retryDelay: 200 });
           action = 'deleted';
         }
       }

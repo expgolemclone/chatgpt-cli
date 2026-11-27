@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import type { Page } from 'playwright';
 import { launchProfile } from '../src/browser/edge.ts';
 import { createProfile } from '../src/browser/profiles.ts';
-import { NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
+import { LoginRequiredError, NonFreeAccountError, ProfileNotReadyError, runChat } from '../src/chat.ts';
 import { AccessBlockedError, assertAccess, type ChallengeEvent } from '../src/browser/account.ts';
 import { generateBatches, maxPrompts, type Prompt } from '../src/prompts/generate.ts';
 import { accountCheck, challengeFixture, featurePath, fixture } from './fixtures/chat.ts';
@@ -184,6 +184,12 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
         : mode === 'submission-error' ? 500 : 200;
       response.writeHead(status, mode === 'submission-challenge' ? { 'cf-mitigated': 'challenge' } : {});
       response.end('ok');
+    } else if (mode === 'auth-login' && request.url === '/') {
+      response.writeHead(302, { location: '/auth/login?next=%2F' });
+      response.end();
+    } else if (request.url?.startsWith('/auth/login')) {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<h1>ログインまたは新規登録</h1><input type="email" name="username"><button>続ける</button>');
     } else {
       if (request.url === '/') navigations++;
       response.writeHead(mode === 'forbidden' ? 403 : 200, { 'content-type': 'text/html; charset=utf-8' });
@@ -392,9 +398,11 @@ test('chat flow uses only a disposable profile and a local HTTP fixture', async 
       assert.deepEqual(sent, [prompt.text, next.text]);
     });
     await t.test('logged-out pages are not submitted', async () => {
-      mode = 'login'; sent.length = 0;
-      await assert.rejects(runChat(page, [prompt], options), ProfileNotReadyError);
-      assert.equal(sent.length, 0);
+      for (const value of ['login', 'auth-login']) {
+        mode = value; sent.length = 0;
+        await assert.rejects(runChat(page, [prompt], options), LoginRequiredError);
+        assert.equal(sent.length, 0, value);
+      }
     });
     await t.test('manual edits after filling are not sent', async () => {
       mode = 'normal'; sent.length = 0;

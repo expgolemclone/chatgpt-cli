@@ -3,7 +3,13 @@ import type { Page, Request, Response } from 'playwright';
 
 export class AccessBlockedError extends Error {}
 export class CloudflareChallengeError extends AccessBlockedError {}
-const loginName = /^(Log in(?: or sign up)?|Sign in|ログイン(?:または新規登録)?)$/i;
+const loginName = /^(?:Log in(?: or sign up)?|Log back in|Sign in(?: again)?|ログイン(?:または新規登録)?|再度?ログイン|サインイン)$/i;
+const chatgptOrigin = 'https://chatgpt.com';
+const authOrigins = new Set(['https://auth.openai.com', 'https://auth0.openai.com']);
+const chatgptLoginPath = /^\/auth\/login(?:\/|$)/i;
+const authLoginPath = /^\/(?:log-in(?:-[a-z-]+)?|login|u\/login(?:\/|$)|authorize\/login(?:\/|$))/i;
+const loginHeading = /^(?:Log in(?: or sign up)?|Sign in|Welcome back|Choose an account|ログイン(?:または新規登録)?|サインイン|おかえりなさい|アカウントを選択)$/i;
+const authContinueName = /^(?:Continue(?: with .+)?|.+ で続ける|続ける)$/i;
 export const emailPattern = /^[^@\s]+@[^@\s]+$/;
 const blockedText = /you(?:(?:'|’)?ve| have) (?:reached|hit).{0,80}(?:limit|maximum)|too many requests|usage limit|利用制限に達|上限に達|リクエストが多すぎ/i;
 const challengeText = /verify (?:that )?you are human|verifying (?:that )?you are human|checking your browser|performing security verification|人間であることを確認|セキュリティ検証を実行|ブラウザを確認|接続のセキュリティを確認/i;
@@ -11,9 +17,35 @@ const challengeTitle = /^(?:just a moment\.{0,3}|attention required!?(?:\s*\|.*)
 const accessText = new RegExp(`${blockedText.source}|${challengeText.source}`, 'i');
 const conversationContent = '[data-talvt-turn-state], [data-message-author-role], [data-user-message-bubble], [role="textbox"], nav, aside';
 
-export function loginControl(page: Page) {
+export function isAllowedOrigin(url: string, origin: string): boolean {
+  let target: URL;
+  try { target = new URL(url); } catch { return false; }
+  return target.origin === origin || (origin === chatgptOrigin && authOrigins.has(target.origin));
+}
+
+export function isLoginUrl(url: string, origin: string): boolean {
+  let target: URL;
+  try { target = new URL(url); } catch { return false; }
+  if (target.origin === origin) return chatgptLoginPath.test(target.pathname);
+  return origin === chatgptOrigin && authOrigins.has(target.origin) && authLoginPath.test(target.pathname);
+}
+
+function loginControl(page: Page) {
   return page.getByRole('button', { name: loginName }).or(page.getByRole('link', { name: loginName }))
     .filter({ visible: true }).first();
+}
+
+function loginPageControl(page: Page) {
+  return page.getByRole('heading', { name: loginHeading })
+    .or(page.locator('input[name="username"], input[name="email"], input[type="email"]'))
+    .or(page.getByRole('button', { name: authContinueName }))
+    .filter({ visible: true }).first();
+}
+
+export async function isLoginSurface(page: Page, origin: string): Promise<boolean> {
+  if (await loginControl(page).isVisible()) return true;
+  if (typeof page.url !== 'function' || !isLoginUrl(page.url(), origin)) return false;
+  return await loginPageControl(page).isVisible();
 }
 
 export interface ChallengeResponse {
@@ -103,12 +135,15 @@ export function observeAccount(page: Page, origin: string, onChallenge?: AccessO
   };
   const onResponse = (response: Response) => {
     const target = new URL(response.url());
-    if (target.origin !== origin) return;
+    const sameOrigin = target.origin === origin;
+    const allowedAuth = origin === chatgptOrigin && authOrigins.has(target.origin);
+    if (!sameOrigin && !allowedAuth) return;
     const request = response.request();
-    const identityRequest = target.pathname === identityPath;
-    const planRequest = target.pathname.startsWith(planPath);
-    const chatRequest = /^\/backend-api\/(?:f\/conversation|sentinel)(?:\/|$)/.test(target.pathname);
+    const identityRequest = sameOrigin && target.pathname === identityPath;
+    const planRequest = sameOrigin && target.pathname.startsWith(planPath);
+    const chatRequest = sameOrigin && /^\/backend-api\/(?:f\/conversation|sentinel)(?:\/|$)/.test(target.pathname);
     const mainDocument = request.isNavigationRequest() && response.frame() === page.mainFrame();
+    if (!sameOrigin && !mainDocument) return;
     const status = response.status();
     if (mainDocument) {
       account.navigationStatus = status;

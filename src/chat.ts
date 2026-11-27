@@ -2,7 +2,7 @@ import { basename } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import type { JSHandle, Locator, Page, Response } from 'playwright';
 import type { Prompt } from './prompts/generate.ts';
-import { AccessBlockedError, CloudflareChallengeError, assertAccess, loginControl, observeAccount,
+import { AccessBlockedError, CloudflareChallengeError, assertAccess, isLoginSurface, observeAccount,
   type AccessOptions, type ChallengeEvent } from './browser/account.ts';
 import { classifyProfile } from './browser/inspect.ts';
 
@@ -85,7 +85,6 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
     expectedEmail = email; // Pin even an explicitly selected profile with a non-email directory name.
     return true;
   };
-  const login = loginControl(page);
   const stopped = page.getByTestId('stop-button').or(page.getByRole('button', { name: stopName })).first();
   const turns = page.locator('[data-talvt-turn-state]');
   const guard = async () => {
@@ -93,7 +92,7 @@ export async function runChat(page: Page, request: Prompt[] | ImageTurn, options
     const pausedMs = await assertAccess(page, account, accessOptions);
     if (image && new URL(page.url()).origin !== origin) throw new ProfileNotReadyError('Chat origin changed; check the selected profile.');
     if (!image && account.plan?.sending === 'non-free') throw new NonFreeAccountError('Non-free account detected; this profile will be skipped.');
-    if (await login.isVisible()) {
+    if (await isLoginSurface(page, origin)) {
       throw new LoginRequiredError('Login required; manual login is needed.');
     }
     return pausedMs;
